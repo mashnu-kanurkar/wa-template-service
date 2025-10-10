@@ -1,0 +1,9 @@
+Django>=4.0
+djangorestframework
+psycopg2-binary
+celery
+redis
+requests
+PyJWT
+drf-yasg>=1.21.3
+jsonschema>=4.0.1
