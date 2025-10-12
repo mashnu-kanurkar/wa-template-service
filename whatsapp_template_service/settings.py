@@ -1,7 +1,11 @@
 import os
 from pathlib import Path
+from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).resolve().parent.parent
+
+# Load environment variables
+load_dotenv(BASE_DIR / '.env')
 
 SECRET_KEY = os.environ.get('DJANGO_SECRET_KEY', 'dev-secret')
 DEBUG = True
@@ -22,7 +26,6 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
-    'wa_templates.middleware.InjectOrgMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
@@ -51,24 +54,22 @@ TEMPLATES = [
 WSGI_APPLICATION = 'whatsapp_template_service.wsgi.application'
 
 # Allow using SQLite for fast local development by setting USE_SQLITE=1
-USE_SQLITE = str(os.environ.get('USE_SQLITE', '')).lower() in ('1', 'true', 'yes')
-
-if USE_SQLITE:
+if os.getenv("USE_SQLITE") == "true":
     DATABASES = {
-        'default': {
-            'ENGINE': 'django.db.backends.sqlite3',
-            'NAME': str(BASE_DIR / 'db.sqlite3'),
+        "default": {
+            "ENGINE": "django.db.backends.sqlite3",
+            "NAME": BASE_DIR / "db.sqlite3",
         }
     }
 else:
     DATABASES = {
-        'default': {
-            'ENGINE': 'django.db.backends.postgresql',
-            'NAME': os.environ.get('POSTGRES_DB', 'whatsapp_template_db'),
-            'USER': os.environ.get('POSTGRES_USER', 'postgres'),
-            'PASSWORD': os.environ.get('POSTGRES_PASSWORD', 'postgres'),
-            'HOST': os.environ.get('POSTGRES_HOST', 'localhost'),
-            'PORT': os.environ.get('POSTGRES_PORT', '5432'),
+        "default": {
+            "ENGINE": "django.db.backends.postgresql",
+            "NAME": os.getenv("POSTGRES_DB"),
+            "USER": os.getenv("POSTGRES_USER"),
+            "PASSWORD": os.getenv("POSTGRES_PASSWORD"),
+            "HOST": os.getenv("POSTGRES_HOST"),
+            "PORT": os.getenv("POSTGRES_PORT"),
         }
     }
 
@@ -78,6 +79,9 @@ REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': (
         'wa_templates.auth.JWTAuthentication',
     ),
+    'DEFAULT_PERMISSION_CLASSES': (
+        'rest_framework.permissions.IsAuthenticated',
+    ),
 }
 
 STATIC_URL = '/static/'
@@ -86,7 +90,7 @@ STATIC_URL = '/static/'
 JWT_PUBLIC_KEY = os.environ.get('JWT_PUBLIC_KEY', '')
 
 # JWT claim names configurable to support different identity providers
-JWT_TENANT_CLAIM = os.environ.get('JWT_TENANT_CLAIM', 'tenant')
+JWT_TENANT_CLAIM = os.environ.get('JWT_TENANT_CLAIM', 'org')
 JWT_USER_CLAIM = os.environ.get('JWT_USER_CLAIM', 'sub')
 JWT_ALGORITHM = os.environ.get('JWT_ALGORITHM', 'RS256')
 
@@ -94,6 +98,47 @@ JWT_ALGORITHM = os.environ.get('JWT_ALGORITHM', 'RS256')
 CELERY_BROKER_URL = REDIS_URL
 CELERY_RESULT_BACKEND = REDIS_URL
 
-# Gupshup placeholders
-GUPSHUP_API_KEY = os.environ.get('GUPSHUP_API_KEY', '')
-GUPSHUP_APP_ID = os.environ.get('GUPSHUP_APP_ID', '')
+# Logging
+LOG_LEVEL = os.environ.get('LOG_LEVEL', 'DEBUG')
+LOGGING = {
+    'version': 1,
+    'disable_existing_loggers': False,
+    'formatters': {
+        'verbose': {
+            # This format includes all the details you need
+            'format': '{levelname} {asctime} {module} {process:d} {thread:d} {message}',
+            'style': '{',
+        },
+        'simple': {
+            'format': '{levelname} {message}',
+            'style': '{',
+        },
+    },
+    'handlers': {
+        'console': {
+            'class': 'logging.StreamHandler',
+            'formatter': 'simple',
+            'level': 'DEBUG',
+        },
+    },
+    'loggers': {
+        '': { # This is the root logger
+            'handlers': ['console'],
+            'level': 'DEBUG', 
+            'propagate': True,
+        },
+        'django': {
+            'handlers': ['console'],
+            'level': 'INFO', # Keep Django's own noise down, or change to DEBUG if needed
+            'propagate': False,
+        },
+        # You can add a specific logger for your app if you like:
+        'wa_templates': { 
+            'handlers': ['console'],
+            'level': 'DEBUG', # Ensure your app's code is set to DEBUG
+            'propagate': False,
+        },
+    },
+}
+
+

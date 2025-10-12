@@ -1,63 +1,50 @@
 import jwt
-from rest_framework import authentication, exceptions, permissions
+from rest_framework import authentication, exceptions
 from django.conf import settings
 from types import SimpleNamespace
+import logging
 
+logger = logging.getLogger(__name__)
 
 class JWTAuthentication(authentication.BaseAuthentication):
+    """
+    Decode JWT from Authorization header and attach a lightweight user object
+    containing org_id and external_id.
+    """
     def authenticate(self, request):
         auth = authentication.get_authorization_header(request).split()
         if not auth or auth[0].lower() != b'bearer':
+            logger.debug("No Bearer token in Authorization header")
             return None
         if len(auth) == 1:
             raise exceptions.AuthenticationFailed('Invalid token header. No credentials provided.')
+
         token = auth[1]
         try:
             public_key = settings.JWT_PUBLIC_KEY
             alg = getattr(settings, 'JWT_ALGORITHM', 'RS256')
             payload = jwt.decode(token, public_key, algorithms=[alg], options={'verify_aud': False})
+            logger.debug("JWT decoded successfully: %s", payload)
         except Exception as e:
+            logger.error("JWT decode failed: %s", e)
             raise exceptions.AuthenticationFailed('Invalid token') from e
-        # Resolve claim names from settings to support different identity providers
-        tenant_claim = getattr(settings, 'JWT_TENANT_CLAIM', 'tenant')
+
+        # Extract claims
+        org_claim = getattr(settings, 'JWT_ORG_CLAIM', 'org')
         user_claim = getattr(settings, 'JWT_USER_CLAIM', 'sub')
-        # Backwards-compatible fallback alternatives
-        tenant_key = payload.get(tenant_claim) or payload.get('tenant') or payload.get('tenant_id') or payload.get('org')
-        external_user_id = payload.get(user_claim) or payload.get('sub') or payload.get('user_id') or payload.get('uid')
-        if not tenant_key or not external_user_id:
-            # still return payload but no authenticated user
+
+        org_id = payload.get(org_claim) or payload.get('org_id')
+        external_id = payload.get(user_claim) or payload.get('sub') or payload.get('user_id')
+
+        if not org_id or not external_id:
+            logger.debug("JWT missing org_id or user claim, returning payload without user object")
             return (None, payload)
 
-        # Return a lightweight user-like object containing org_id and external id
+        # Lightweight user object
         user = SimpleNamespace()
-        user.org_id = str(tenant_key)
-        user.external_id = str(external_user_id)
+        user.org_id = str(org_id)
+        user.external_id = str(external_id)
         user.is_authenticated = True
+
+        logger.debug("Authenticated user set with org_id: %s, external_id: %s", user.org_id, user.external_id)
         return (user, payload)
-
-
-class IsTenantMember(permissions.BasePermission):
-    """Allow access only to users belonging to the requested tenant."""
-
-    def has_permission(self, request, view):
-        # Determine org requested by the caller. For unsafe methods prefer body, otherwise query param.
-        org_param = None
-        if request.method in ('POST', 'PUT', 'PATCH', 'DELETE'):
-            org_param = request.data.get('org_id') if hasattr(request, 'data') else None
-        if not org_param:
-            org_param = request.query_params.get('org_id') or request.query_params.get('tenant')
-
-        # If no org provided, allow (endpoint may be global)
-        if not org_param:
-            return True
-
-        user = getattr(request, 'user', None)
-        # Deny if unauthenticated
-        if not user:
-            return False
-
-        try:
-            return str(user.org_id) == str(org_param)
-        except Exception:
-            return False
-

@@ -4,15 +4,16 @@ from django.urls import re_path
 from rest_framework import permissions
 from drf_yasg.views import get_schema_view
 from drf_yasg import openapi
+from django.shortcuts import redirect
 
 schema_view = get_schema_view(
     openapi.Info(
-        title="WhatsApp Template Service API",
+        title="WhatsApp Template Service",
         default_version='v1',
-        description="API for managing WhatsApp templates",
+        description="API docs for WhatsApp Template Service",
     ),
     public=True,
-    permission_classes=(permissions.AllowAny,),
+    permission_classes=[permissions.AllowAny],
 )
 
 urlpatterns = [

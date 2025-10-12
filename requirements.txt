@@ -7,3 +7,7 @@ requests
 PyJWT
 drf-yasg>=1.21.3
 jsonschema>=4.0.1
+cryptography
+dotenv
+psycopg2
+requests-toolbelt

@@ -1,21 +1,55 @@
-version: '3.8'
-
 services:
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    container_name: celery-worker-1
+    command: /app/celery_entrypoint.sh
+    environment:
+      # Pass DB/Redis config and ensure unbuffered output for logs
+      POSTGRES_HOST: postgres
+      POSTGRES_DB: whatsapp_template_db
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      REDIS_HOST: redis
+      PYTHONUNBUFFERED: 1
+    depends_on:
+      - django
+      - postgres
+      - redis
+
+  django:
+    build: .
+    container_name: django-1
+    command: /app/django_entrypoint.sh
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: whatsapp_template_db
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      PYTHONUNBUFFERED: 1
+    depends_on:
+      - postgres
+      - redis
+    ports:
+      - "8000:8000"
+
   postgres:
     image: postgres:15
     environment:
       POSTGRES_DB: whatsapp_template_db
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
-    ports:
-      - '5432:5432'
     volumes:
       - pgdata:/var/lib/postgresql/data
 
   redis:
     image: redis:7
     ports:
-      - '6379:6379'
+      - "6379:6379"
 
 volumes:
   pgdata:

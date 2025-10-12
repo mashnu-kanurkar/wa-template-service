@@ -1,0 +1,19 @@
+# Start of Worker Dockerfile
+FROM python:3.11-slim
+
+# Install dependencies for psycopg2/PostgreSQL
+RUN apt-get update && apt-get install -y \
+    libpq-dev gcc \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy all application code
+COPY . .
+
+# Set permissions for the Celery entrypoint script
+RUN chmod +x /app/celery_entrypoint.sh
+ENTRYPOINT ["/app/celery_entrypoint.sh"]
+# End of Worker Dockerfile

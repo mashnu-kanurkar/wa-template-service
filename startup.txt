@@ -1,0 +1,35 @@
+# activate your venv first
+& .\.venv\Scripts\Activate.ps1
+
+docker-compose up -d
+docker ps
+docker exec -it 27d640926381 redis-cli ping
+Get-Process -Name celery -ErrorAction SilentlyContinue | Stop-Process -Force
+taskkill /F /IM celery.exe 2>$null
+
+# ensure env points to Redis
+$env:CELERY_BROKER_URL = 'redis://localhost:6379/0'
+$env:CELERY_RESULT_BACKEND = 'redis://localhost:6379/0'
+
+# run worker with solo pool
+celery -A whatsapp_template_service worker -l info -P solo --concurrency=1
+
+
+##### to stop docker ######
+docker-compose down
+
+
+
+######### in another terminal #################
+# activate your venv first
+& .\.venv\Scripts\Activate.ps1
+
+python manage.py migrate --noinput
+
+python manage.py runserver
+
+#to run django and prostgress in docker
+docker-compose down
+docker compose up --build
+
+

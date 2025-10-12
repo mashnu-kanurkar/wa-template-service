@@ -1,11 +1,14 @@
+import logging
 try:
     from jsonschema import validate, Draft7Validator, FormatChecker
     from jsonschema.exceptions import ValidationError as JsonSchemaValidationError
-except Exception:
+except ImportError:
     validate = None
     Draft7Validator = None
     FormatChecker = None
     JsonSchemaValidationError = None
+
+logger = logging.getLogger(__name__)
 
 
 class PayloadValidationError(Exception):
@@ -18,15 +21,17 @@ class PayloadValidationError(Exception):
         super().__init__('Payload validation failed')
         self.errors = errors
 
-# JSON Schemas for each template type. These are simplified but capture required structure.
+# --- Common Schemas ---
+
 BUTTON_SCHEMA = {
     'type': 'object',
     'properties': {
         'type': {'type': 'string', 'enum': ['QUICK_REPLY', 'URL', 'CALL']},
-        'text': {'type': 'string'},
+        'text': {'type': 'string', 'maxLength': 25},
         'url': {'type': 'string', 'format': 'uri'},
         'buttonValue': {'type': 'string'},
         'suffix': {'type': 'string'},
+        'example': {'type': 'array', 'items': {'type': 'string'}},
     },
     'required': ['type', 'text'],
     'additionalProperties': True,
@@ -34,76 +39,114 @@ BUTTON_SCHEMA = {
     'then': {'required': ['url', 'buttonValue']},
 }
 
-TEXT_SCHEMA = {
+# --- Template Type Schemas (Validates the ENTIRE Input Data) ---
+
+BASE_TEMPLATE_SCHEMA = {
     'type': 'object',
     'properties': {
-        'elementName': {'type': 'string', 'maxLength': 180},
-        'languageCode': {'type': 'string'},
-        'content': {'type': 'string', 'maxLength': 1024},
-        'category': {'type': 'string'},
+        'elementName': {'type': 'string', 'maxLength': 200},
+        'languageCode': {'type': 'string', 'maxLength': 10},
+        'content': {'type': 'string'},
+        'category': {'type': 'string'}, # Assuming Category is validated by DRF choices
         'vertical': {'type': 'string', 'maxLength': 180},
-        'footer': {'type': ['string', 'null']},
         'example': {'type': 'string'},
-        'header': {'type': ['string', 'null']},
-    'buttons': {'type': 'array', 'items': BUTTON_SCHEMA},
+        'template_type': {'type': 'string', 'enum': ['TEXT', 'IMAGE', 'VIDEO', 'DOCUMENT', 'CAROUSEL', 'CATALOG']},
+        'footer': {'type': ['string', 'null'], 'maxLength': 180},
+        'header': {'type': ['string', 'null'], 'maxLength': 180},
+        'exampleHeader': {'type': ['string', 'null']},
+        'media_url': {'type': ['string', 'null'], 'format': 'uri'}, # Model field
+        'enableSample': {'type': 'boolean'}, # Model field
+        'payload': {'type': 'object'}, # Placeholder for nested validation
         'allowTemplateCategoryChange': {'type': 'boolean'},
-        'appId': {'type': 'string'},
     },
-    'required': ['elementName', 'content', 'category', 'vertical', 'example']
+    'required': [
+        'elementName', 
+        'languageCode', 
+        'content', 
+        'category', 
+        'vertical', 
+        'example', 
+        'template_type',
+        'enableSample',
+    ],
+    'additionalProperties': True, # Allow other top-level fields (e.g., org_id, app_id, etc.)
 }
 
+# TEXT TEMPLATE SCHEMA
+TEXT_SCHEMA = dict(BASE_TEMPLATE_SCHEMA, **{
+    'properties': dict(BASE_TEMPLATE_SCHEMA['properties'], **{
+        'payload': {
+            'type': 'object',
+            'properties': {
+                'buttons': {'type': 'array', 'items': BUTTON_SCHEMA, 'maxItems': 10},
+            },
+            'additionalProperties': True,
+        }
+    }),
+    'required': BASE_TEMPLATE_SCHEMA['required'] # Ensure payload is present for buttons validation
+})
+
+# MEDIA TEMPLATE SCHEMA (IMAGE, VIDEO, DOCUMENT)
 MEDIA_SCHEMA = {
-    'type': 'object',
+    **BASE_TEMPLATE_SCHEMA,
     'properties': {
-        'elementName': {'type': 'string', 'maxLength': 180},
-        'languageCode': {'type': 'string'},
-        'content': {'type': 'string'},
-        'category': {'type': 'string'},
-        'vertical': {'type': 'string', 'maxLength': 180},
-        'footer': {'type': ['string', 'null']},
-        'example': {'type': 'string'},
-    'exampleMedia': {'type': ['string', 'null']},
-        'enableSample': {'type': ['boolean', 'null']},
-        'allowTemplateCategoryChange': {'type': 'boolean'},
-        'appId': {'type': 'string'},
+        **BASE_TEMPLATE_SCHEMA['properties'],
+        'payload': {
+            'type': 'object',
+            'properties': {
+                'buttons': {'type': 'array', 'items': BUTTON_SCHEMA, 'maxItems': 10},
+            },
+            'additionalProperties': True,
+        },
     },
-    'required': ['elementName', 'content', 'category', 'vertical', 'example', 'appId'],
-    'if': {'properties': {'enableSample': {'const': True}}},
-    'then': {'required': ['exampleMedia']}
+    'required': BASE_TEMPLATE_SCHEMA['required'],
+    'allOf': [
+        {
+            'if': {'properties': {'enableSample': {'const': True}}},
+            'then': {
+                'required': ['media_url'],
+                'properties': {
+                    'media_url': {'not': {'type': 'null'}},
+                    'file_type': {'not': {'type': 'null'}},
+                }
+            }
+        }
+    ],
 }
 
-CAROUSEL_SCHEMA = {
+# CAROUSEL TEMPLATE SCHEMA
+CAROUSEL_CARD_SCHEMA = {
     'type': 'object',
     'properties': {
-        'elementName': {'type': 'string', 'maxLength': 180},
-        'languageCode': {'type': 'string'},
-        'content': {'type': 'string'},
-        'category': {'type': 'string'},
-        'vertical': {'type': 'string'},
-        'example': {'type': 'string'},
-        'enableSample': {'type': ['boolean', 'null']},
-        'cards': {
-            'type': 'array',
-            'items': {
-                'type': 'object',
-                'properties': {
-                    'headerType': {'type': 'string', 'enum': ['IMAGE', 'VIDEO', 'DOCUMENT']},
-                    'mediaUrl': {'type': ['string', 'null'], 'format': 'uri'},
-                    'mediaId': {'type': ['string', 'null']},
-                    'exampleMedia': {'type': ['string', 'null']},
-                    'body': {'type': 'string'},
-                    'sampleText': {'type': 'string'},
-                    'buttons': {'type': 'array', 'items': BUTTON_SCHEMA},
-                },
-                'required': ['body'],
-                'additionalProperties': True,
-            }
-        },
-        'allowTemplateCategoryChange': {'type': 'boolean'},
-        'appId': {'type': 'string'},
+        'mediaUrl': {'type': ['string', 'null'], 'format': 'uri'},
+        'body': {'type': 'string'},
+        'sampleText': {'type': 'string'},
+        'buttons': {'type': 'array', 'items': BUTTON_SCHEMA, 'maxItems': 2},
+        'example':{'type': 'array', 'items': {'type': 'string'}},
     },
-    'required': ['elementName', 'content', 'category', 'vertical', 'example', 'cards', 'appId']
+    'required': ['mediaUrl', 'body', 'headerType', 'buttons'], # Buttons are mandatory on cards
+    'additionalProperties': True,
 }
+
+CAROUSEL_SCHEMA = dict(BASE_TEMPLATE_SCHEMA, **{
+    'properties': dict(BASE_TEMPLATE_SCHEMA['properties'], **{
+        'payload': {
+            'type': 'object',
+            'properties': {
+                'cards': {
+                    'type': 'array',
+                    'items': CAROUSEL_CARD_SCHEMA,
+                    'minItems': 1,
+                    'maxItems': 10,
+                },
+            },
+            'required': ['cards'],
+            'additionalProperties': True,
+        }
+    }),
+    'required': BASE_TEMPLATE_SCHEMA['required'] + ['enableSample', 'payload']
+})
+
 
 SCHEMAS = {
     'TEXT': TEXT_SCHEMA,
@@ -111,21 +154,36 @@ SCHEMAS = {
     'VIDEO': MEDIA_SCHEMA,
     'DOCUMENT': MEDIA_SCHEMA,
     'CAROUSEL': CAROUSEL_SCHEMA,
-    'CATALOG': {'type': 'object'},
+    'CATALOG': BASE_TEMPLATE_SCHEMA, # Minimal validation for CATALOG
 }
 
 
-def validate_payload(template_type, payload):
+def validate_payload(template_type, data):
+    """
+    Validate the entire template data dictionary against schema rules for the given template type.
+    
+    In this context, 'data' is the full dictionary from serializer.validated_data.
+    Raises PayloadValidationError with dict of errors if invalid.
+    """
+    logger.debug('Validating full template data for type %s', template_type)
+    
     schema = SCHEMAS.get(template_type)
+    
     if not schema:
+        logger.error('No schema found for template type: %s', template_type)
         raise PayloadValidationError({'_schema': f'No schema for template type {template_type}'})
-    # jsonschema may not be installed in the environment running unit tests for
-    # unrelated modules. Delay raising an ImportError until validation is needed.
+        
     if Draft7Validator is None or FormatChecker is None:
+        logger.error('jsonschema library is not installed')
         raise ImportError('jsonschema is required to validate payloads. Install via pip install jsonschema')
 
+    # --- 1. Perform Schema Validation on the entire data dictionary ---
+    
+    # NOTE: We use data (the full validated_data) here, not just data.get('payload')
     validator = Draft7Validator(schema, format_checker=FormatChecker())
-    errors = sorted(validator.iter_errors(payload), key=lambda e: e.path)
+    errors = sorted(validator.iter_errors(data), key=lambda e: e.path)
+    logger.debug('Found %d schema validation errors', len(errors))
+    
     if errors:
         errs = {}
         for e in errors:
@@ -133,36 +191,28 @@ def validate_payload(template_type, payload):
             path = []
             for p in e.path:
                 if isinstance(p, int):
-                    # array index
                     if path:
                         path[-1] = f"{path[-1]}[{p}]"
                     else:
                         path.append(f"[{p}]")
                 else:
                     path.append(str(p))
+            
+            # Use the field name as the key, prefix nested errors with 'payload.'
             key = '.'.join(path) if path else '_schema'
-            # friendly message
             errs[key] = e.message
+            
         raise PayloadValidationError(errs)
-    # additional checks: buttons/cards structure
-    # validate buttons if present
-    # additional semantic checks with friendly messages
-    if 'buttons' in payload and isinstance(payload['buttons'], list):
-        for idx, b in enumerate(payload['buttons']):
-            if not isinstance(b, dict):
-                raise PayloadValidationError({f'buttons[{idx}]': 'Each button must be an object'})
-            if 'type' not in b or 'text' not in b:
-                raise PayloadValidationError({f'buttons[{idx}]': 'Each button must include type and text'})
-            if b.get('type') == 'URL':
-                if not b.get('url') or not b.get('buttonValue'):
-                    raise PayloadValidationError({f'buttons[{idx}]': 'URL buttons require url and buttonValue'})
-    # validate cards structure for carousel
+
+    # --- 2. Additional Semantic Checks ---
+    
+    # Check for CAROUSEL specific requirements (media existence check)
     if template_type == 'CAROUSEL':
-        cards = payload.get('cards') or []
-        if not isinstance(cards, list) or len(cards) == 0:
-            raise PayloadValidationError({'cards': 'cards must be a non-empty list'})
+        # Safely access nested cards using .get()
+        cards = data.get('payload', {}).get('cards') or []
         for idx, c in enumerate(cards):
-            if not isinstance(c, dict):
-                raise PayloadValidationError({f'cards[{idx}]': 'each card must be an object'})
+            # Check for media reference on each card
             if not (c.get('mediaUrl') or c.get('mediaId') or c.get('exampleMedia')):
-                raise PayloadValidationError({f'cards[{idx}]': 'each card requires mediaUrl or mediaId or exampleMedia'})
+                raise PayloadValidationError({
+                    f'payload.cards[{idx}]': 'Each card requires mediaUrl, mediaId, or exampleMedia.'
+                })
