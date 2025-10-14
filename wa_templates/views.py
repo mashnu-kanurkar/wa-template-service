@@ -5,9 +5,11 @@ from rest_framework import viewsets, status
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.decorators import action, api_view
 from rest_framework.response import Response
-from rest_framework.exceptions import PermissionDenied, ValidationError, NotFound, AuthenticationFailed
+from rest_framework.exceptions import PermissionDenied, ValidationError, NotFound
 from drf_yasg.utils import swagger_auto_schema
 from drf_yasg import openapi
+
+from wa_templates.tasks import process_gupshup_webhook
 
 from .models import WhatsAppTemplate, Organisation, ProviderAppInstance
 from .serializers import WhatsAppTemplateSerializer, OrganisationSerializer, ProviderAppInstanceSerializer
@@ -85,22 +87,25 @@ class WhatsAppTemplateViewSet(OrgAppAwareViewSet):
         logger.debug('Performing create for WhatsAppTemplate')
         org_id, app_id = self.get_org_and_app()
 
-        # Get the queryset filtered by org and app instance (using your existing logic)
-        qs = WhatsAppTemplate.objects.filter(org_id=org_id, provider_app_instance_app_id__app_id=app_id)
-
-        organisation_instance = Organisation.objects.get(id=org_id)
-        if not organisation_instance:
-            raise NotFound(f"Organisation with id '{org_id}' not found.")
+        try:
+            organisation_instance = Organisation.objects.get(id=org_id)
+        except Organisation.DoesNotExist:
+            raise ValidationError(f"Organisation with id '{org_id}' not found.")
         
-        provider_instance = ProviderAppInstance.objects.filter(organisation_id=org_id, app_id=app_id).first()
-        if not provider_instance:
-            raise NotFound(f"ProviderAppInstance with app_id '{app_id}' not found for organisation '{org_id}'.")
+        try:
+            provider_instance = ProviderAppInstance.objects.filter(organisation_id=org_id, app_id=app_id).first()
+        except ProviderAppInstance.DoesNotExist:
+            raise ValidationError(f"ProviderAppInstance with app_id '{app_id}' not found for organisation '{org_id}'.")
+        
         serializer.validated_data['org_id'] = organisation_instance
         serializer.validated_data['provider_app_instance_app_id'] = provider_instance
         
         # Check if a template with the same name already exists in the filtered queryset
         template_elementName = serializer.validated_data.get('elementName')
         template_language = serializer.validated_data.get('languageCode', 'en')
+                # Get the queryset filtered by org and app instance (using your existing logic)
+        
+        qs = WhatsAppTemplate.objects.filter(org_id=org_id, provider_app_instance_app_id__app_id=app_id)
         if qs.filter(elementName=template_elementName, languageCode=template_language).exists():
             raise ValidationError(
                 {"elementName": f"A WhatsApp template with the name '{template_elementName}' and languageCode '{template_language}' already exists for this organization and app."}
@@ -266,24 +271,18 @@ def templateTypes(request):
 def gupshup_webhook(request):
     logger.debug('Received Gupshup webhook: %s', request.data)
     data = request.data
-    template_id = data.get('id')
-    status_ = data.get('status')
+    event_type = data.get('type')
+    if not event_type == 'template-event':
+        return Response({'detail': 'template-event'}, status=202)
     try:
-        logger.debug('Fetching WhatsAppTemplate with id: %s', template_id)
-        t = WhatsAppTemplate.objects.get(provider_template_id=template_id)
-    except WhatsAppTemplate.DoesNotExist:
-        logger.error('WhatsAppTemplate not found with id: %s', template_id)
-        return Response({'detail': 'not found'}, status=404)
-
-    if status_ == 'approved':
-        t.status = 'approved'
-    elif status_ == 'rejected':
-        t.status = 'rejected'
-
-    logger.debug('Updating template %s status to %s', template_id, t.status)
-    t.provider_metadata.update({'last_webhook': data})
-    t.save()
-    return Response({'detail': 'updated'})
+        processed = process_gupshup_webhook.delay(data)
+        if processed:
+            return Response({'detail': 'updated'}, status=202)
+        else:
+            return Response({'detail': 'Failed'}, status=404)
+    except Exception as e:
+        logger.error('Exception while processing payload')
+        return Response({'detail': 'Failed'}, status=404)
 
 # ---------------------------
 # Organisation ViewSet

@@ -11,11 +11,13 @@ class WhatsAppTemplateSerializer(serializers.ModelSerializer):
     class Meta:
         model = WhatsAppTemplate
         fields = ('id', 'languageCode','vertical', 'footer', 
-                  'allowTemplateCategoryChange', 'example', 'exampleHeader', 
+                  'allowTemplateCategoryChange', 'example', 'exampleHeader','exampleMedia', 
                   'header','enableSample', 'templateType', 'category', 'content', 
-                  'media_url','file_type', 'provider_metadata', 'status', 'created_at', 
-                  'updated_at', 'payload', 'provider_template_id', 'containerMeta', 'createdOn', 'data', 'elementName', 'languagePolicy', 'meta',
-                  'namespace', 'modifiedOn', 'priority', 'quality', 'retry', 'stage', 'wabaId', 'errorMessage', 'isDeleted',)
+                  'media_url', 'provider_metadata', 'status', 'created_at', 
+                  'updated_at', 'payload', 'provider_template_id', 'containerMeta', 'createdOn', 
+                  'data', 'elementName', 'languagePolicy', 'meta',
+                  'namespace', 'modifiedOn', 'priority', 'quality', 
+                  'retry', 'stage', 'wabaId', 'errorMessageMeta', 'isDeleted','webhookMeta' )
         
 
     def validate(self, data):

@@ -1,9 +1,9 @@
+import logging
 import mimetypes
 import re
 from urllib.parse import urlparse
 from django.core.validators import URLValidator
 from django.core.exceptions import ValidationError
-import logging
 
 logger = logging.getLogger(__name__)
 
@@ -30,50 +30,83 @@ ALLOWED_MIME_TYPES = {
     "video/3gpp",
 }
 
-def is_valid_media_url(url: str, expected_mime: str) -> bool:
+# Template-type → allowed MIME group
+TEMPLATE_MIME_GROUPS = {
+    "IMAGE": {"image/jpeg", "image/png", "image/webp"},
+    "VIDEO": {"video/mp4", "video/3gpp"},
+    "DOCUMENT": {
+        "application/pdf",
+        "application/msword",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "application/vnd.ms-powerpoint",
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        "application/vnd.ms-excel",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "text/plain",
+    },
+    "AUDIO": {
+        "audio/aac",
+        "audio/mp4",
+        "audio/mpeg",
+        "audio/amr",
+        "audio/ogg",
+        "audio/opus",
+    },
+}
+
+
+def is_valid_media_url(url: str, template_type: str) -> tuple[bool, str | None]:
     """
     Validates that:
       1. URL is a valid HTTP(S) URL
-      2. The file extension maps to the expected MIME type
-      3. The MIME type is one of the allowed ones
+      2. The MIME type inferred from URL is valid and allowed for the given template_type
+
+    Returns:
+      (is_valid: bool, file_type: str | None)
     """
     if not url:
-        return False
+        logger.debug("Empty URL provided.")
+        return False, None
 
-    # 1. Basic URL structure validation
+    # 1. Validate URL structure
     try:
-        URLValidator(schemes=['http', 'https'])(url)
+        URLValidator(schemes=["http", "https"])(url)
     except ValidationError:
         logger.debug(f"Invalid URL structure: {url}")
-        return False
+        return False, None
 
-    # 2. MIME type check validity
-    if expected_mime not in ALLOWED_MIME_TYPES:
-        logger.warning(f"Unexpected MIME type provided: {expected_mime}")
-        return False
+    # 2. Normalize template_type
+    template_type = template_type.upper().strip()
+    if template_type not in TEMPLATE_MIME_GROUPS:
+        logger.warning(f"Unknown template type: {template_type}")
+        return False, None
 
-    # 3. Infer MIME type from file extension
+    # 3. Infer MIME type
     parsed_url = urlparse(url)
-    url_path = parsed_url.path.lower()
-
-    guessed_mime, _ = mimetypes.guess_type(url_path)
+    guessed_mime, _ = mimetypes.guess_type(parsed_url.path.lower())
 
     if not guessed_mime:
         logger.debug(f"Could not infer MIME type from URL: {url}")
-        return False
+        return False, None
 
-    # 4. Match inferred MIME with expected
-    if guessed_mime != expected_mime:
-        logger.debug(f"MIME type mismatch: expected {expected_mime}, got {guessed_mime}")
-        return False
+    # 4. Ensure MIME is allowed
+    if guessed_mime not in ALLOWED_MIME_TYPES:
+        logger.debug(f"MIME '{guessed_mime}' not in allowed list.")
+        return False, guessed_mime
 
-    # 5. Finally, check that expected MIME is allowed
-    if expected_mime not in ALLOWED_MIME_TYPES:
-        logger.debug(f"MIME {expected_mime} not in allowed list.")
-        return False
+    # 5. Check MIME compatibility with template_type
+    allowed_for_template = TEMPLATE_MIME_GROUPS[template_type]
+    if guessed_mime not in allowed_for_template:
+        logger.debug(
+            f"MIME '{guessed_mime}' not allowed for template type '{template_type}'. "
+            f"Allowed: {allowed_for_template}"
+        )
+        return False, guessed_mime
 
-    logger.debug(f"URL '{url}' is valid for MIME type '{expected_mime}'")
-    return True
+    logger.debug(f"URL '{url}' is valid for template type '{template_type}' with MIME '{guessed_mime}'.")
+    return True, guessed_mime
+
+
 # ----------------------------------------------------------------------
 # 2. Gupshup Handle ID Check
 # ----------------------------------------------------------------------

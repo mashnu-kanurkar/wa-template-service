@@ -1,6 +1,8 @@
 from datetime import datetime
-import time
 from celery import shared_task
+
+from wa_templates.utils import constants
+from wa_templates.webhooks.gupshup_webhook import handle_gupshup_template_webhook
 from .models import WhatsAppTemplate, ProviderAppInstance
 from .providers.factory import get_provider
 import logging
@@ -8,6 +10,25 @@ from django.db import transaction
 
 
 logger = logging.getLogger(__name__)
+
+@shared_task(bind=True, max_retried=3)
+def process_gupshup_webhook(self, webhook_data):
+    self.update_state(state='PROGRESS', meta={'current': 0, 'total': 3, 'status': 'Starting sync'})
+    logger.info("Processing incoming webhook event")
+    try:
+        processed = handle_gupshup_template_webhook(webhook_data=webhook_data)
+        if processed:
+            self.update_state(state='PROGRESS', meta={'current': 3, 'total': 3, 'status': 'Processed successfully'})
+        else:
+            raise ValueError("Something went wrong")
+    except Exception as e:
+        error_msg = f'Max retries exceeded. Final error: {e}'
+        self.update_state(state='FAILURE', meta={
+                'status': error_msg,
+                'exc_type': type(e).__name__,
+                'exc_message': str(e)
+            })
+        raise ValueError(error_msg)
 
 @shared_task(bind=True, max_retries=3)
 def sync_templates_for_app_id(self, app_id, org_id):
@@ -138,19 +159,24 @@ def submit_template_for_approval(self, template_id, app_id, org_id):
         resp = provider.submit_template(t)
         
         # Ensure resp is a dictionary with 'ok' and 'response' keys
-        t.provider_metadata.update({'last_update': str(str(datetime.now().timestamp()))}) 
+        t.provider_metadata.update({'last_update': str(datetime.now().timestamp())})
 
         if resp.get('ok'):
             logger.info('Template %s successfully submitted.', template_id)
             self.update_state(state='PROGRESS', meta={'current': 3, 'total': 3, 'status': 'Successfully submitted.'})
-            t.errorMessage = None
-            t.save()
-            return {'status': 'SUCCESS', 'response': resp.get('response')}
+            t.update_error_meta(
+                        constants.GupshupAction.APPLY_TEMPLATE.value,
+                        'Success'
+                    )
+            message = f'Template {t.provider_template_id} submitted to gupshup'
+            return {'status': 'SUCCESS', 'response': message}
         else:
             error_message = resp.get('response', 'Unknown submission error.')
             logger.error('Failed to submit template %s: %s', template_id, error_message)
-            t.errorMessage = error_message
-            t.save()
+            t.update_error_meta(
+                        constants.GupshupAction.APPLY_TEMPLATE.value,
+                        error_message
+                    )
             self.update_state(state='FAILURE', meta={
                 'status': error_message,
                 'exc_type': type(ValueError(error_message)).__name__,
@@ -164,6 +190,10 @@ def submit_template_for_approval(self, template_id, app_id, org_id):
             raise self.retry(exc=e, countdown=2**self.request.retries)
         except self.MaxRetriesExceededError:
             error_msg = f'Max retries exceeded. Final error: {e}'
+            t.update_error_meta(
+                        constants.GupshupAction.APPLY_TEMPLATE.value,
+                        error_message
+                    )
             self.update_state(state='FAILURE', meta={
                 'status': error_msg,
                 'exc_type': type(e).__name__,
@@ -226,14 +256,19 @@ def update_template_with_provider(self, template_id, app_id, org_id):
         if result.get('ok'):
             logger.info("Template %s updated and status set to 'pending'.", t.id)
             self.update_state(state='PROGRESS', meta={'current': 3, 'total': 3, 'status': 'Update successfully submitted.'})
-            t.errorMessage = None
-            t.save()
-            return {'status': 'SUCCESS', 'response': result.get('response')}
+            t.update_error_meta(
+                        constants.GupshupAction.UPDATE_TEMPLATE.value,
+                        "Success"
+                    )
+            message = f'Template {t.provider_template_id} submitted to gupshup'
+            return {'status': 'SUCCESS', 'response': message}
         else:
             error_message = result.get('response', 'Unknown update error.')
             logger.error("Failed to update template %s with provider: %s", t.id, error_message)
-            t.errorMessage = error_message
-            t.save()
+            t.update_error_meta(
+                        constants.GupshupAction.UPDATE_TEMPLATE.value,
+                        error_message
+                    )
             self.update_state(state='FAILURE', meta={
                 'status': error_message,
                 'exc_type': type(ValueError(error_message)).__name__,
@@ -247,6 +282,10 @@ def update_template_with_provider(self, template_id, app_id, org_id):
             raise self.retry(exc=e, countdown=2**self.request.retries)
         except self.MaxRetriesExceededError:
             error_msg = f'Max retries exceeded. Final error: {e}'
+            t.update_error_meta(
+                        constants.GupshupAction.APPLY_TEMPLATE.value,
+                        error_message
+                    )
             self.update_state(state='FAILURE', meta={
                 'status': error_msg,
                 'exc_type': type(e).__name__,
@@ -299,10 +338,14 @@ def delete_template_with_provider(self, template_id, app_id, org_id):
             logger.info("Template %s successfully deleted from provider.", t.id)
             self.update_state(state='PROGRESS', meta={'current': 3, 'total': 3, 'status': 'Successfully deleted from provider'})
             t.delete()
-            return {'status': 'SUCCESS', 'message': f'Template {t.id} deleted.'}
+            return {'status': 'SUCCESS', 'message': f'Template {t.id} (provider template id {t.provider_template_id}) deleted.'}
         else:
             logger.error("Failed to delete template %s from provider: %s", t.id, result.get('response'))
             error_message = result.get('response', 'Unknown provider error')
+            t.update_error_meta(
+                        constants.GupshupAction.DELETE_TEMPLATE.value,
+                        error_message
+                    )
             self.update_state(state='FAILURE', meta={
                 'status': error_message,
                 'exc_type': type(ValueError(error_message)).__name__,
@@ -316,6 +359,10 @@ def delete_template_with_provider(self, template_id, app_id, org_id):
             raise self.retry(exc=e, countdown=2**self.request.retries)
         except self.MaxRetriesExceededError:
             error_msg = f'Max retries exceeded. Final error: {e}'
+            t.update_error_meta(
+                        constants.GupshupAction.DELETE_TEMPLATE.value,
+                        error_message
+                    )
             self.update_state(state='FAILURE', meta={
                 'status': error_msg,
                 'exc_type': type(e).__name__,

@@ -1,3 +1,4 @@
+from datetime import datetime
 import hashlib
 import json
 from django.db import models
@@ -89,10 +90,15 @@ class ProviderAppInstance(models.Model):
 class WhatsAppTemplate(models.Model):
     STATUS_CHOICES = [
         ('draft', 'Draft'),
-        ('pending', 'Pending Approval'),
+        ('pending', 'Pending'),
         ('approved', 'Approved'),
         ('rejected', 'Rejected'),
-        ('failed', 'Failed')
+        ('failed', 'Failed'),
+        ('paused', 'Paused'),
+        ('deleted', 'Deleted'),
+        ('disabled', 'Disabled'),
+        ('in_appeal', 'In_appeal')
+        
     ]
 
     templateTypeS = [
@@ -108,8 +114,10 @@ class WhatsAppTemplate(models.Model):
         ('TRANSACTIONAL', 'Transactional'),
         ('OTP', 'One-Time Password'),
         ('UTILITY', 'Utility'),
+        ('AUTHENTICATION', 'AUTHENTICATION'),
         ('NULL', 'Null')
     ]
+
 
     LANGUAGE_CHOICES = [
         ('af', 'Afrikaans'),
@@ -191,33 +199,33 @@ class WhatsAppTemplate(models.Model):
         ("Deleted", 'deleted'),
     ]
 
-    VALID_MIME_TYPES = (
-                ('audio/aac', 'audio/aac'),
-                ('audio/mp4', 'audio/mp4'),
-                ('audio/mpeg', 'audio/mpeg'),
-                ('audio/amr', 'audio/amr'),
-                ('audio/ogg', 'audio/ogg'),
-                ('audio/opus', 'audio/opus'),
+    # VALID_MIME_TYPES = (
+    #             ('audio/aac', 'audio/aac'),
+    #             ('audio/mp4', 'audio/mp4'),
+    #             ('audio/mpeg', 'audio/mpeg'),
+    #             ('audio/amr', 'audio/amr'),
+    #             ('audio/ogg', 'audio/ogg'),
+    #             ('audio/opus', 'audio/opus'),
                 
-                # Documents
-                ('application/pdf', 'application/pdf'),
-                ('text/plain', 'text/plain'),
-                ('application/msword', 'application/msword'),
-                ('application/vnd.ms-excel', 'application/vnd.ms-excel'),
-                ('application/vnd.ms-powerpoint', 'application/vnd.ms-powerpoint'),
-                ('application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'),
-                ('application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'),
-                ('application/vnd.openxmlformats-officedocument.presentationml.presentation', 'application/vnd.openxmlformats-officedocument.presentationml.presentation'),
+    #             # Documents
+    #             ('application/pdf', 'application/pdf'),
+    #             ('text/plain', 'text/plain'),
+    #             ('application/msword', 'application/msword'),
+    #             ('application/vnd.ms-excel', 'application/vnd.ms-excel'),
+    #             ('application/vnd.ms-powerpoint', 'application/vnd.ms-powerpoint'),
+    #             ('application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'),
+    #             ('application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'),
+    #             ('application/vnd.openxmlformats-officedocument.presentationml.presentation', 'application/vnd.openxmlformats-officedocument.presentationml.presentation'),
 
-                # Images
-                ('image/jpeg', 'image/jpeg'),
-                ('image/png', 'image/png'),
-                ('image/webp', 'image/webp'),
+    #             # Images
+    #             ('image/jpeg', 'image/jpeg'),
+    #             ('image/png', 'image/png'),
+    #             ('image/webp', 'image/webp'),
                 
-                # Videos
-                ('video/mp4', 'video/mp4'),
-                ('video/3gpp', 'video/3gpp'),
-            )
+    #             # Videos
+    #             ('video/mp4', 'video/mp4'),
+    #             ('video/3gpp', 'video/3gpp'),
+    #         )
 
     templateType = models.CharField(max_length=20, choices=templateTypeS)
     languageCode = models.CharField(max_length=10, choices=LANGUAGE_CHOICES, default='en')
@@ -225,12 +233,12 @@ class WhatsAppTemplate(models.Model):
     oldCategory = models.CharField(max_length=20, choices=CATEGORY_CHOICES, null=True)
     content = models.TextField(blank=True)
     media_url = models.URLField(blank=True, null=True)
-    file_type = models.CharField(
-        max_length=90,
-        choices=VALID_MIME_TYPES,
-        blank=True, 
-        null=True
-    )
+    # file_type = models.CharField(
+    #     max_length=90,
+    #     choices=VALID_MIME_TYPES,
+    #     blank=True, 
+    #     null=True
+    # )
     vertical = models.CharField(max_length=180, blank=True, null=True)
     footer = models.CharField(max_length=180, blank=True, null=True)
     allowTemplateCategoryChange = models.BooleanField(default=False)
@@ -239,6 +247,7 @@ class WhatsAppTemplate(models.Model):
     header = models.CharField(max_length=180, blank=True, null=True)
     enableSample = models.BooleanField(default=False)
     provider_metadata = JSONField(default=dict, blank=True)
+    exampleMedia = models.TextField(blank=True, null=True)
     # structured payload containing template-type-specific fields (buttons, cards, exampleMedia, etc.)
     payload = JSONField(default=dict, blank=True)
     # External tenant/org identifier from upstream identity provider (do not duplicate tenant DB)
@@ -269,9 +278,10 @@ class WhatsAppTemplate(models.Model):
     retry = models.IntegerField(default=0)
     stage = models.CharField(max_length=100, blank=True, null=True)
     wabaId = models.CharField(max_length=100, blank=True, null=True)
-    errorMessage = models.TextField(blank=True, null=True)
+    errorMessageMeta = models.JSONField(default=dict, blank=True)
     isDeleted = models.CharField(max_length=10, choices=DELETE_CHOICES, default='none')
     hash = models.CharField(max_length=64, blank=True, null=True)
+    webhookMeta = models.JSONField(default=dict, blank=True)
 
     class Meta:
         unique_together = ("org_id", "elementName", "languageCode", "provider_app_instance_app_id")
@@ -335,52 +345,59 @@ class WhatsAppTemplate(models.Model):
     
 
     
-    def json(self):
-        """Return a JSON-serializable representation of the template."""
-        return {
-            "id": self.id,
-            "templateType": self.templateType,
-            "languageCode": self.languageCode,
-            "category": self.category,
-            "content": self.content,
-            "media_url": self.media_url,
-            "file_type": self.file_type,
-            "vertical": self.vertical,
-            "footer": self.footer,
-            "allowTemplateCategoryChange": self.allowTemplateCategoryChange,
-            "example": self.example,
-            "exampleHeader": self.exampleHeader,
-            "header": self.header,
-            "enableSample": self.enableSample,
-            "provider_metadata": self.provider_metadata,
-            "payload": self.payload,
-            "org_id": self.org_id.id if self.org_id else None,
-            "provider_app_instance_app_id": self.provider_app_instance_app_id.app_id if self.provider_app_instance_app_id else None,
-            "status": self.status,
-            "created_at": self.created_at.isoformat() if self.created_at else None,
-            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
-            "provider_template_id": self.provider_template_id,
-            "containerMeta": self.containerMeta,
-            "createdOn": self.createdOn.isoformat() if self.createdOn else None,
-            "data": self.data,
-            "elementName": self.elementName,
-            "languagePolicy": self.languagePolicy,
-            "meta": self.meta,
-            "namespace": self.namespace,
-            "modifiedOn": self.modifiedOn.isoformat() if self.modifiedOn else None,
-            "priority": self.priority,
-            "quality": self.quality,
-            "retry": self.retry,
-            "stage": self.stage,
-            "wabaId": self.wabaId,
-            "errorMessage": self.errorMessage,
-            "isDeleted": self.isDeleted,
-        }
-    
     def mark_as_deleted(self):
         """Mark the template as deleted."""
         self.isDeleted = 'Deleted'
         self.save()
+    
+    def update_error_meta(self, key, value):
+        """
+        Updates an existing JSONField by reading the current value, 
+        modifying the dictionary, and saving the instance.
+        """
+        
+        # 1. Read: Get the current dictionary
+        meta = self.errorMessageMeta or {}
+        
+        # 2. Modify: Update the dictionary in memory
+        error = {}
+        error['payload'] = value
+        error['ts'] = str(datetime.now().timestamp())
+        meta[key] = error
+        
+        
+        # 3. Write: Assign the modified dictionary back to the field
+        self.errorMessageMeta = meta
+        
+        # 4. Save: Persist the change to the database
+        self.save()
+    
+    def _update_and_log_webhook_event(self, event_type: str, main_field_value:str, event_payload: dict):
+        """
+        Helper to perform two operations atomically:
+        1. Update the main model fields (status, category, quality).
+        2. Replace the event details in webhookMeta[event_type] with the latest data.
+        """
+        if event_type == 'status-update':
+            self.status = main_field_value
+        elif event_type == "category-update":
+            self.category = main_field_value
+        elif event_type == 'quality-update':
+            self.quality = main_field_value
+        
+        # Add timestamp and source payload
+        event_payload['ts'] = str(datetime.now().timestamp())
+        # event_data['raw_payload'] = event_payload # Optional: store raw payload for debugging
+        
+        # 3. Replace the entry in webhookMeta
+        meta = self.webhookMeta or {}
+        # This replaces the entire dictionary associated with event_type
+        meta[event_type] = event_payload 
+        self.webhookMeta = meta
+        
+        # 4. Save the instance to persist changes
+        self.save()
+    
     
 
     

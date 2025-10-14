@@ -110,7 +110,6 @@ MEDIA_SCHEMA = {
                 'required': ['media_url'],
                 'properties': {
                     'media_url': {'not': {'type': 'null'}},
-                    'file_type': {'not': {'type': 'null'}},
                 }
             }
         }

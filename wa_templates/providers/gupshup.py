@@ -5,6 +5,7 @@ from urllib.parse import urlencode
 import requests
 
 from wa_templates.models import WhatsAppTemplate
+from wa_templates.utils import constants
 from wa_templates.utils.media_validator import is_gupshup_handle_id, is_valid_media_url
 from .base import BaseProvider
 from django.conf import settings
@@ -86,29 +87,34 @@ class GupshupProvider(BaseProvider):
                     dump_data = dump.dump_all(r)
                     logger.debug("Outgoing HTTP:\n%s", dump_data.decode("utf-8"))
                 except Exception as e:
-                    logger.warning("Failed to dump request: %s", e)
+                    logger.exception("Failed to dump request: %s", e)
                 r.raise_for_status() # Raise HTTPError for bad responses (4xx or 5xx)
             
             except requests.exceptions.HTTPError as e:
-                logger.error("HTTP Error from Gupshup (%s %s): %s", method, endpoint, e)
+                logger.exception("HTTP Error from Gupshup (%s %s): %s", method, endpoint, e)
                 # Return standardized error structure
                 return {'ok': False, 'status_code': r.status_code, 'response': r.text}
             
             except requests.exceptions.RequestException as e:
-                logger.error("Network Error during Gupshup request (%s %s): %s", method, endpoint, e)
+                logger.exception("Network Error during Gupshup request (%s %s): %s", method, endpoint, e)
                 return {'ok': False, 'status_code': 0, 'response': f'Network Error: {e}'}
 
         # 3. Process Successful Response
         response_data = {'ok': True, 'status_code': r.status_code}
         try:
             # Attempt to parse JSON only if content type indicates JSON
+            logger.debug(f'raw response before processing {r.raw}')
             if r.headers.get('content-type', '').startswith('application/json'):
+                logger.debug(f'writing from json. response {r.json}')
                 response_data['json'] = r.json()
             else:
+                logger.debug(f'writing from text. response {r.text}')
                 response_data['text'] = r.text
         except json.JSONDecodeError:
+                logger.error(f'JSONDecodeError {r.raw}')
                 response_data['text'] = r.text
         
+        logger.debug(f'final respons_data {response_data}')
         return response_data
 
     def upload_media(self, media_url, file_type):
@@ -198,7 +204,7 @@ class GupshupProvider(BaseProvider):
                         response.raise_for_status() # For non-200 responses, raise to trigger retry/exit
 
                 except Exception as e:
-                    logger.error("Error on upload attempt %d: %s", attempt + 1, str(e))
+                    logger.exception("Error on upload attempt %d: %s", attempt + 1, str(e))
 
                 # Retry after exponential backoff
                 time.sleep(1 + attempt)
@@ -207,10 +213,10 @@ class GupshupProvider(BaseProvider):
             raise requests.exceptions.HTTPError("Media upload failed after retries.")
 
         except requests.exceptions.RequestException as e:
-            logger.error("Request/Network Exception during media upload: %s", str(e))
+            logger.exception("Request/Network Exception during media upload: %s", str(e))
             raise e
         except Exception as e:
-            logger.error("General Exception during media upload: %s", str(e))
+            logger.exception("General Exception during media upload: %s", str(e))
             raise e
 
     def submit_template(self, template):
@@ -223,21 +229,36 @@ class GupshupProvider(BaseProvider):
 
                 if isHandleId:
                     logger.debug('media_url is already a Gupshup handle ID, skipping upload')
-                    template.provider_metadata['media_id'] = template.media_url
+                    #template.provider_metadata['media_id'] = template.media_url
+                    template.exampleMedia = template.media_url
                     template.save()
                 else:
                     logger.debug('media_url is not a Gupshup handle ID, proceeding to upload')
-                    isValidMedia = is_valid_media_url(template.media_url, template.file_type)
+                    isValidMedia, file_type  = is_valid_media_url(template.media_url, template.templateType)
                     if not isValidMedia:
+                        template.update_error_meta(
+                                constants.GupshupAction.UPLOAD_MEDIA.value,
+                                "Invalid media URL or file type"
+                            )
                         logger.error('Invalid media URL or file type, aborting template submission')
                         return {'ok': False, 'response': 'Invalid media URL or file type'}
                     
-                    handle_id = self.upload_media(template.media_url, template.file_type)
+                    handle_id = self.upload_media(template.media_url, file_type)
                     if handle_id:
                         logger.debug('Media uploaded successfully: %s', handle_id)
-                        template.provider_metadata['media_id'] = handle_id
+                        # template.provider_metadata['media_id'] = handle_id
+                        template.exampleMedia = handle_id
+                        template.media_url = handle_id
                         template.save()
+                        template.update_error_meta(
+                                constants.GupshupAction.UPLOAD_MEDIA.value,
+                                "Success"
+                            )
                     else:
+                        template.update_error_meta(
+                                constants.GupshupAction.UPLOAD_MEDIA.value,
+                                "Media upload failed"
+                            )
                         logger.error('Media upload failed, aborting template submission')
                         return {'ok': False, 'response': 'Media upload failed'}
 
@@ -248,16 +269,26 @@ class GupshupProvider(BaseProvider):
                 'category': template.category,
                 'templateType': template.templateType,
                 'vertical': template.vertical,
-                'footer': template.footer,
-                'allowTemplateCategoryChange': str(template.allowTemplateCategoryChange).lower(),
                 'example': template.example,
-                'exampleHeader': template.exampleHeader,
-                'header': template.header,
-                'enableSample': str(template.enableSample).lower(),
             }
 
-            if template.enableSample and 'media_id' in template.provider_metadata:
-                payload['exampleMedia'] = template.provider_metadata['media_id']
+
+            if template.enableSample and template.enableSample is not None :
+                payload['exampleMedia'] = template.media_url
+            
+            
+            if template.exampleHeader and template.exampleHeader is not None:
+                payload['exampleHeader'] = template.exampleHeader
+
+            if template.allowTemplateCategoryChange and template.allowTemplateCategoryChange is not None:
+                payload['allowTemplateCategoryChange'] = str(template.allowTemplateCategoryChange).lower()
+
+            if template.footer and template.footer is not None:
+                payload['footer'] = template.footer
+            
+            if template.header and template.header is not None:
+                payload['header'] = template.header
+
 
             buttons = []
             if template.payload:
@@ -278,19 +309,35 @@ class GupshupProvider(BaseProvider):
                         'sampleText': card_data.get('sampleText'),
                     }
                     if card_data.get('mediaUrl'):
-                        # Upload media for each card if mediaUrl is present
-                        logger.debug('Uploading media for carousel card: %s', card_data.get('mediaUrl'))
-                        isValidMedia = is_valid_media_url(card_data.get('mediaUrl'), card_data.get('headerType'))
-                        if not isValidMedia:
-                            logger.error('Invalid media URL or file type for carousel card, aborting template submission')
-                            return {'ok': False, 'response': 'Invalid media URL or file type in carousel card'}
-
-                        card_upload = self.upload_media(card_data.get('mediaUrl'), card_data.get('headerType'))
-                        if card_upload:
-                            card['exampleMedia'] = card_upload.get('handleId').get('message')
+                        isHandleId = is_gupshup_handle_id(card_data.get('mediaUrl'))
+                        if isHandleId:
+                            logger.debug('card media_url is already a Gupshup handle ID, skipping upload')
+                            #template.provider_metadata['media_id'] = template.media_url
+                            card['exampleMedia'] = isHandleId
                         else:
-                            logger.error('Failed to upload media for carousel card: %s', card_data.get('mediaUrl'))
-                            return {'ok': False, 'response': 'Failed to upload media for carousel card'}
+                            # Upload media for each card if mediaUrl is present
+                            logger.debug('Uploading media for carousel card: %s', card_data.get('mediaUrl'))
+                            isValidMedia, file_type = is_valid_media_url(card_data.get('mediaUrl'), card_data.get('headerType'))
+                            if not isValidMedia:
+                                logger.error('Invalid media URL or file type for carousel card, aborting template submission')
+                                return {'ok': False, 'response': 'Invalid media URL or file type in carousel card'}
+
+                            card_upload = self.upload_media(card_data.get('mediaUrl'), file_type)
+                            if card_upload:
+                                handle_id = card_upload.get('handleId').get('message')
+                                card['exampleMedia'] = handle_id
+                                card['mediaUrl'] = handle_id
+                                template.update_error_meta(
+                                    constants.GupshupAction.APPLY_TEMPLATE.value,
+                                    "Card media upload success"
+                                )
+                            else:
+                                logger.error('Failed to upload media for carousel card: %s', card_data.get('mediaUrl'))
+                                template.update_error_meta(
+                                    constants.GupshupAction.APPLY_TEMPLATE.value,
+                                    "Failed to upload card media"
+                                )
+                                return {'ok': False, 'response': 'Failed to upload media for carousel card'}
                     
                     if card_data.get('buttons'):
                         card_buttons = self.parse_buttons(card_data.get('buttons'))
@@ -311,27 +358,32 @@ class GupshupProvider(BaseProvider):
                 response_body = provider_resp_data.get('json', provider_resp_data.get('text'))
                 # ... (your success logic using response_body) ...
                 if provider_resp_data.get('json', {}).get('status') == 'success':
-                    self.save_template_data_from_provider(provider_resp_data['json'], template)
-                    return {'ok': True, 'response': template.json()}
+                    self.save_template_data_from_provider(provider_resp_data.get('json'), template)
+                    return {'ok': True, 'response': template}
                 else:
                     error_text = response_body # Use the JSON response body here
                     logger.error('Template submission failed with response: %s', error_text)
-                    template.errorMessage = error_text
-                    template.save()
+                    template.update_error_meta(
+                        constants.GupshupAction.APPLY_TEMPLATE.value,
+                        error_text
+                    )
                     return {'ok': False, 'response': error_text}
             
             else:
                 # Handle failure from _make_request (network or HTTP error)
                 error_text = provider_resp_data.get('response')
-                template.errorMessage = error_text
-                template.save()
+                template.update_error_meta(
+                        constants.GupshupAction.APPLY_TEMPLATE.value,
+                        error_text
+                    )
                 return {'ok': False, 'response': error_text}
         except Exception as e:
-            logger.error('Exception during template submission: %s', str(e))
-            return {'ok': False, 'response': f'Internal error'}
+            logger.exception(f'error stack trace {e.__traceback__}')
+            logger.exception('Exception during template submission: %s', str(e))
+            return {'ok': False, 'response': str(e)}
 
     def save_template_data_from_provider(self, r, template):
-        logger.debug('Saving provider response data to template %s', r.json())
+        logger.debug('Saving provider response data to template %s', r)
         t_data = r.get('template', {})
 
         if t_data.get('containerMeta'):
@@ -460,7 +512,7 @@ class GupshupProvider(BaseProvider):
     
     def delete_template(self, template):
         try: 
-            url_path = f"/partner/app/{self.app_id}/templates/{template.elementName}"
+            url_path = f"/partner/app/{self.app_id}/templates/{template.provider_template_id}"
             provider_resp_data = self._make_request(
                 method='DELETE',
                 endpoint=url_path
@@ -469,14 +521,26 @@ class GupshupProvider(BaseProvider):
                 logger.debug('Template deletion response status: %d', provider_resp_data['status_code'])
                 # Status 200 or 204 are successful deletions
                 if provider_resp_data['status_code'] in (200, 204):
+                    template.update_error_meta(
+                        constants.GupshupAction.DELETE_TEMPLATE.value,
+                        "Success"
+                    )
                     return {'ok': True}
                 else:
+                    template.update_error_meta(
+                        constants.GupshupAction.DELETE_TEMPLATE.value,
+                        provider_resp_data.get('text', 'Deletion failed with unexpected status.')
+                    )
                     return {'ok': False, 'response': provider_resp_data.get('text', 'Deletion failed with unexpected status.')}
 
             return {'ok': False, 'response': provider_resp_data.get('response')}
         except Exception as e:
-            logger.error('Exception during template deletion: %s', str(e))
-            return {'ok': False, 'response': "Internal error"}
+            template.update_error_meta(
+                        constants.GupshupAction.DELETE_TEMPLATE.value,
+                        "Exception during template deletion"
+                    )
+            logger.exception('Exception during template deletion: %s', str(e))
+            return {'ok': False, 'response': str(e)}
     
     def update_template(self, template):
         try:
@@ -493,23 +557,31 @@ class GupshupProvider(BaseProvider):
                     self.save_template_provider(provider_resp_data['json'], template)
                     template.status = 'pending'
                     template.save()
-                    return {'ok': True, 'response': template.json()}
+                    template.update_error_meta(
+                        constants.GupshupAction.UPDATE_TEMPLATE.value,
+                        "Success"
+                    )
+                    return {'ok': True, 'response': template}
                 else:
                     error_text = response_body # Use the JSON response body here
                     logger.error('Template submission failed with response: %s', error_text)
-                    template.errorMessage = error_text
-                    template.save()
+                    template.update_error_meta(
+                        constants.GupshupAction.UPDATE_TEMPLATE.value,
+                        error_text
+                    )
                     return {'ok': False, 'response': error_text}
             
             else:
                 # Handle failure from _make_request (network or HTTP error)
                 error_text = provider_resp_data.get('response')
-                template.errorMessage = error_text
-                template.save()
+                template.update_error_meta(
+                        constants.GupshupAction.UPDATE_TEMPLATE.value,
+                        error_text
+                    )
                 return {'ok': False, 'response': error_text}
         except Exception as e:
-            logger.error('Exception during template update: %s', str(e))
-            return {'ok': False, 'response': "Internal error"}
+            logger.exception('Exception during template update: %s', str(e))
+            return {'ok': False, 'response': str(e)}
         
     def sync_templates(self, tpl,tpl_hash, template_obj = None):
         
