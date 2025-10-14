@@ -13,7 +13,7 @@ from wa_templates.views import (
     OrganisationViewSet,
     ProviderAppInstanceViewSet,
     WhatsAppTemplateViewSet,
-    template_types,
+    templateTypes,
     gupshup_webhook,
     template_schemas # Assuming this is the correct import path
 )
@@ -63,7 +63,7 @@ with mock.patch('wa_templates.views.submit_template_for_approval') as mock_task:
             )
             self.template = WhatsAppTemplate.objects.create(
                 name='initial_template',
-                template_type='TEXT',
+                templateType='TEXT',
                 content='Hello {{1}}',
                 org_id=self.org,
                 provider_app_instance_app_id=self.provider_instance,
@@ -174,7 +174,7 @@ class WhatsAppTemplateViewSetTests(BaseTestCase):
         
         self.create_data = {
             'name': 'new_marketing_temp',
-            'template_type': 'TEXT',
+            'templateType': 'TEXT',
             'content': 'Buy our stuff {{1}}',
             'media_url': None,
             'payload': {'category': 'MARKETING', 'languageCode': 'en'}
@@ -186,7 +186,7 @@ class WhatsAppTemplateViewSetTests(BaseTestCase):
         org2 = Organisation.objects.create(id='org_X', name='Org X')
         app2 = ProviderAppInstance.objects.create(app_id='app_X', organisation=org2, encrypted_app_token='token')
         WhatsAppTemplate.objects.create(
-            name='excluded_template', template_type='TEXT', content='Excluded', org_id=org2, provider_app_instance_app_id=app2
+            name='excluded_template', templateType='TEXT', content='Excluded', org_id=org2, provider_app_instance_app_id=app2
         )
         
         response = self.client.get(self.list_url)
@@ -242,11 +242,11 @@ class WhatsAppTemplateViewSetTests(BaseTestCase):
 
 class StandaloneFunctionTests(BaseTestCase):
     
-    # Test template_types API endpoint
+    # Test templateTypes API endpoint
     @mock.patch.object(template_schemas, 'SCHEMAS', {'text': {'schema': '...'}, 'image': {'schema': '...'}})
-    def test_template_types(self):
-        # Assuming the URL name is 'template_types'
-        url = reverse('template_types')
+    def test_templateTypes(self):
+        # Assuming the URL name is 'templateTypes'
+        url = reverse('templateTypes')
         response = self.client.get(url)
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertIn('types', response.data)

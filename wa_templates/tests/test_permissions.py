@@ -24,7 +24,7 @@ class PermissionTest(TestCase):
         headers = {'HTTP_AUTHORIZATION': f'Bearer {token}', 'CONTENT_TYPE': 'application/json'}
         # try to create a template for other tenant
         import json
-        data = {'tenant': self.other.id, 'name': 't1', 'template_type': 'TEXT', 'content': 'hi'}
+        data = {'tenant': self.other.id, 'name': 't1', 'templateType': 'TEXT', 'content': 'hi'}
         resp = self.client.post('/api/templates/', json.dumps(data), **headers)
         # should be forbidden (403)
         self.assertEqual(resp.status_code, 403)

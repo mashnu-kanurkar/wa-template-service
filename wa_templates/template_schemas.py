@@ -26,9 +26,10 @@ class PayloadValidationError(Exception):
 BUTTON_SCHEMA = {
     'type': 'object',
     'properties': {
-        'type': {'type': 'string', 'enum': ['QUICK_REPLY', 'URL', 'CALL']},
+        'type': {'type': 'string', 'enum': ['QUICK_REPLY', 'URL', 'PHONE_NUMBER']},
         'text': {'type': 'string', 'maxLength': 25},
         'url': {'type': 'string', 'format': 'uri'},
+        'phone_number': {'type': 'string', 'maxLength': 25},
         'buttonValue': {'type': 'string'},
         'suffix': {'type': 'string'},
         'example': {'type': 'array', 'items': {'type': 'string'}},
@@ -37,6 +38,8 @@ BUTTON_SCHEMA = {
     'additionalProperties': True,
     'if': {'properties': {'type': {'const': 'URL'}}},
     'then': {'required': ['url', 'buttonValue']},
+    'if': {'properties': {'type': {'const': 'PHONE_NUMBER'}}},
+    'then': {'required': ['phone_number']},
 }
 
 # --- Template Type Schemas (Validates the ENTIRE Input Data) ---
@@ -50,7 +53,7 @@ BASE_TEMPLATE_SCHEMA = {
         'category': {'type': 'string'}, # Assuming Category is validated by DRF choices
         'vertical': {'type': 'string', 'maxLength': 180},
         'example': {'type': 'string'},
-        'template_type': {'type': 'string', 'enum': ['TEXT', 'IMAGE', 'VIDEO', 'DOCUMENT', 'CAROUSEL', 'CATALOG']},
+        'templateType': {'type': 'string', 'enum': ['TEXT', 'IMAGE', 'VIDEO', 'DOCUMENT', 'CAROUSEL', 'CATALOG']},
         'footer': {'type': ['string', 'null'], 'maxLength': 180},
         'header': {'type': ['string', 'null'], 'maxLength': 180},
         'exampleHeader': {'type': ['string', 'null']},
@@ -66,7 +69,7 @@ BASE_TEMPLATE_SCHEMA = {
         'category', 
         'vertical', 
         'example', 
-        'template_type',
+        'templateType',
         'enableSample',
     ],
     'additionalProperties': True, # Allow other top-level fields (e.g., org_id, app_id, etc.)
@@ -158,20 +161,20 @@ SCHEMAS = {
 }
 
 
-def validate_payload(template_type, data):
+def validate_payload(templateType, data):
     """
     Validate the entire template data dictionary against schema rules for the given template type.
     
     In this context, 'data' is the full dictionary from serializer.validated_data.
     Raises PayloadValidationError with dict of errors if invalid.
     """
-    logger.debug('Validating full template data for type %s', template_type)
+    logger.debug('Validating full template data for type %s', templateType)
     
-    schema = SCHEMAS.get(template_type)
+    schema = SCHEMAS.get(templateType)
     
     if not schema:
-        logger.error('No schema found for template type: %s', template_type)
-        raise PayloadValidationError({'_schema': f'No schema for template type {template_type}'})
+        logger.error('No schema found for template type: %s', templateType)
+        raise PayloadValidationError({'_schema': f'No schema for template type {templateType}'})
         
     if Draft7Validator is None or FormatChecker is None:
         logger.error('jsonschema library is not installed')
@@ -207,7 +210,7 @@ def validate_payload(template_type, data):
     # --- 2. Additional Semantic Checks ---
     
     # Check for CAROUSEL specific requirements (media existence check)
-    if template_type == 'CAROUSEL':
+    if templateType == 'CAROUSEL':
         # Safely access nested cards using .get()
         cards = data.get('payload', {}).get('cards') or []
         for idx, c in enumerate(cards):

@@ -1,5 +1,9 @@
+import hashlib
+import json
 from django.db import models
 import logging
+
+from django.forms import model_to_dict
 try:
     # Django 3.1+
     from django.db.models import JSONField
@@ -88,9 +92,10 @@ class WhatsAppTemplate(models.Model):
         ('pending', 'Pending Approval'),
         ('approved', 'Approved'),
         ('rejected', 'Rejected'),
+        ('failed', 'Failed')
     ]
 
-    TEMPLATE_TYPES = [
+    templateTypeS = [
         ('TEXT', 'Text'),
         ('IMAGE', 'Image'),
         ('VIDEO', 'Video'),
@@ -103,6 +108,7 @@ class WhatsAppTemplate(models.Model):
         ('TRANSACTIONAL', 'Transactional'),
         ('OTP', 'One-Time Password'),
         ('UTILITY', 'Utility'),
+        ('NULL', 'Null')
     ]
 
     LANGUAGE_CHOICES = [
@@ -185,12 +191,46 @@ class WhatsAppTemplate(models.Model):
         ("Deleted", 'deleted'),
     ]
 
-    template_type = models.CharField(max_length=20, choices=TEMPLATE_TYPES)
+    VALID_MIME_TYPES = (
+                ('audio/aac', 'audio/aac'),
+                ('audio/mp4', 'audio/mp4'),
+                ('audio/mpeg', 'audio/mpeg'),
+                ('audio/amr', 'audio/amr'),
+                ('audio/ogg', 'audio/ogg'),
+                ('audio/opus', 'audio/opus'),
+                
+                # Documents
+                ('application/pdf', 'application/pdf'),
+                ('text/plain', 'text/plain'),
+                ('application/msword', 'application/msword'),
+                ('application/vnd.ms-excel', 'application/vnd.ms-excel'),
+                ('application/vnd.ms-powerpoint', 'application/vnd.ms-powerpoint'),
+                ('application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'),
+                ('application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'),
+                ('application/vnd.openxmlformats-officedocument.presentationml.presentation', 'application/vnd.openxmlformats-officedocument.presentationml.presentation'),
+
+                # Images
+                ('image/jpeg', 'image/jpeg'),
+                ('image/png', 'image/png'),
+                ('image/webp', 'image/webp'),
+                
+                # Videos
+                ('video/mp4', 'video/mp4'),
+                ('video/3gpp', 'video/3gpp'),
+            )
+
+    templateType = models.CharField(max_length=20, choices=templateTypeS)
     languageCode = models.CharField(max_length=10, choices=LANGUAGE_CHOICES, default='en')
     category = models.CharField(max_length=20, choices=CATEGORY_CHOICES, default='MARKETING')
+    oldCategory = models.CharField(max_length=20, choices=CATEGORY_CHOICES, null=True)
     content = models.TextField(blank=True)
     media_url = models.URLField(blank=True, null=True)
-    file_type = models.CharField(max_length=20, blank=True, null=True)  # e.g., 'image/jpeg', 'video/mp4'
+    file_type = models.CharField(
+        max_length=90,
+        choices=VALID_MIME_TYPES,
+        blank=True, 
+        null=True
+    )
     vertical = models.CharField(max_length=180, blank=True, null=True)
     footer = models.CharField(max_length=180, blank=True, null=True)
     allowTemplateCategoryChange = models.BooleanField(default=False)
@@ -213,13 +253,17 @@ class WhatsAppTemplate(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
     provider_template_id = models.CharField(max_length=100, blank=True, null=True)
     containerMeta = JSONField(default=dict, blank=True)
-    createdOn = models.DateTimeField(auto_now_add=False,blank=True, null=True)
+    buttonSupported = models.CharField(max_length=180, blank=True, null=True)
+    createdOn = models.BigIntegerField(null=True, blank=True)
     data = models.TextField(blank=True, null=True)
     elementName = models.CharField(max_length=200, blank=True, null=True)
+    externalId = models.CharField(max_length=200, blank=True, null=True)
+    internalCategory = models.CharField(max_length=200, blank=True, null=True)
+    internalType = models.CharField(max_length=200, blank=True, null=True)
     languagePolicy = models.CharField(max_length=50, blank=True, null=True)
     meta = models.TextField(blank=True, null=True)
     namespace = models.CharField(max_length=100, blank=True, null=True)
-    modifiedOn = models.DateTimeField(auto_now_add=False, blank=True, null=True)
+    modifiedOn = models.BigIntegerField(null=True, blank=True)
     priority = models.IntegerField(default=0)
     quality = models.CharField(max_length=50, blank=True, null=True)
     retry = models.IntegerField(default=0)
@@ -227,6 +271,7 @@ class WhatsAppTemplate(models.Model):
     wabaId = models.CharField(max_length=100, blank=True, null=True)
     errorMessage = models.TextField(blank=True, null=True)
     isDeleted = models.CharField(max_length=10, choices=DELETE_CHOICES, default='none')
+    hash = models.CharField(max_length=64, blank=True, null=True)
 
     class Meta:
         unique_together = ("org_id", "elementName", "languageCode", "provider_app_instance_app_id")
@@ -235,6 +280,42 @@ class WhatsAppTemplate(models.Model):
 
     def __str__(self):
         return f"{self.elementName} ({self.org_id})"
+    
+    def generate_hash(self):
+        # Only include fields that matter for detecting changes
+        template_dict = {
+            "appId": str(self.provider_app_instance_app_id.app_id),
+            "buttonSupported": self.buttonSupported,
+            "category": self.category,
+            "containerMeta": self.containerMeta,
+            "createdOn": self.createdOn,
+            "data": self.data,
+            "elementName": self.elementName,
+            "externalId": self.externalId,
+            "id": self.provider_template_id,
+            "internalCategory": self.internalCategory,
+            "internalType": self.internalType,
+            "languageCode": self.languageCode,
+            "languagePolicy": self.languagePolicy,
+            "meta": self.meta,
+            "modifiedOn": self.modifiedOn,
+            "namespace": self.namespace,
+            "oldCategory": self.oldCategory,
+            "priority": self.priority,
+            "quality": self.quality,
+            "retry": self.retry,
+            "stage": self.stage,
+            "status": self.status,
+            "templateType": self.templateType,
+            "wabaId": self.wabaId
+        }
+        sorted_json = json.dumps(template_dict, sort_keys=True)
+        return hashlib.md5(sorted_json.encode('utf-8')).hexdigest()
+
+    def save(self, *args, **kwargs):
+        # Always update hash before saving
+        self.hash = self.generate_hash()
+        super().save(*args, **kwargs)
     
     @classmethod
     def get_templates_by_element_name(cls, name):
@@ -252,11 +333,13 @@ class WhatsAppTemplate(models.Model):
         """Returns a QuerySet of all templates matching the given provider_template_id."""
         return cls.objects.filter(provider_template_id=provider_template_id)
     
+
+    
     def json(self):
         """Return a JSON-serializable representation of the template."""
         return {
             "id": self.id,
-            "template_type": self.template_type,
+            "templateType": self.templateType,
             "languageCode": self.languageCode,
             "category": self.category,
             "content": self.content,

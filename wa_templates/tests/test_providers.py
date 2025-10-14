@@ -8,7 +8,7 @@ class ProviderTest(TestCase):
     @patch('wa_templates.providers.gupshup.requests.post')
     def test_upload_media_and_submit(self, mock_post):
         t = Tenant.objects.create(name='Acme', slug='acme3')
-        tpl = WhatsAppTemplate.objects.create(tenant=t, name='img1', template_type='IMAGE', media_url='https://example.com/sample.jpg', content='hi')
+        tpl = WhatsAppTemplate.objects.create(tenant=t, name='img1', templateType='IMAGE', media_url='https://example.com/sample.jpg', content='hi')
 
         # mock media upload response
         mock_post.return_value.status_code = 200

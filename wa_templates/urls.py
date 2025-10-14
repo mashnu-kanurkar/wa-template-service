@@ -1,6 +1,6 @@
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
-from .views import WhatsAppTemplateViewSet, OrganisationViewSet, ProviderAppInstanceViewSet, TaskStatusView, gupshup_webhook, template_types
+from .views import WhatsAppTemplateViewSet, OrganisationViewSet, ProviderAppInstanceViewSet, TaskStatusView, gupshup_webhook, templateTypes
 
 router = DefaultRouter()
 router.register('templates', WhatsAppTemplateViewSet)
@@ -28,17 +28,24 @@ template_send_for_approval = WhatsAppTemplateViewSet.as_view({
     'post': 'send_for_approval'
 })
 
+template_sync_from_provider = WhatsAppTemplateViewSet.as_view(
+    {
+        'post':'sync_from_provider'
+    }
+)
+
 urlpatterns = [
     path('', include(router.urls)),
     # AppId-based template routes
     path('<str:app_id>/templates/', template_list, name='template-list'),
     path('<str:app_id>/templates/<int:pk>/', template_detail, name='template-detail'),
     path('<str:app_id>/templates/<int:pk>/send_for_approval',template_send_for_approval, name='template-send-for-approval'),
+    path('<str:app_id>/templates/sync_provider',template_sync_from_provider, name='template-sync-from-provider'),
 
     path('<str:app_id>/provider/', provider_details, name='provider-detail'),
     
     path('tasks/<uuid:task_id>/status/', TaskStatusView.as_view(), name='task-status'),
 
     path('webhooks/gupshup/', gupshup_webhook, name='gupshup_webhook'),
-    path('template-types/', template_types, name='template_types'),
+    path('template-types/', templateTypes, name='templateTypes'),
 ]

@@ -1,12 +1,18 @@
+from datetime import datetime
+import hashlib
 import json
+from urllib.parse import urlencode
 import requests
 
+from wa_templates.models import WhatsAppTemplate
 from wa_templates.utils.media_validator import is_gupshup_handle_id, is_valid_media_url
 from .base import BaseProvider
 from django.conf import settings
 import time
 import logging
 from requests_toolbelt.utils import dump
+from io import BytesIO
+from urllib.parse import urlparse
 
 
 logger = logging.getLogger(__name__)
@@ -14,19 +20,19 @@ logger = logging.getLogger(__name__)
 class GupshupProvider(BaseProvider):
     BASE = 'https://partner.gupshup.io'
 
-    def __init__(self, app_token=None, app_id=None):
+    def __init__(self, app_token=None, app_id=None, org_id=None):
         self.app_token = app_token
         self.app_id = app_id
+        self.org_id = org_id
 
     def headers(self):
         logger.debug('Generating headers for GupshupProvider with app_id %s', self.app_id)
         return {
             'Authorization': f'{self.app_token}',
             "Accept": "application/json",
-            'Content-Type': 'application/x-www-form-urlencoded'
         }
     
-    def _make_request(self, method, endpoint, data=None, params=None, is_json=False):
+    def _make_request(self, method, endpoint, data=None, params=None, is_json=False, content_type=None):
         """
         Central function to execute an API request, log the cURL command, 
         and handle standard provider errors.
@@ -35,29 +41,47 @@ class GupshupProvider(BaseProvider):
                 # Determine the correct data payload (form data or JSON)
         kwargs = {
             'headers': self.headers(), 
-            'params': params,
         }
+        if params:
+            kwargs['params'] = params
+        
+        logger.debug(f'headers and params are ready')
         if is_json:
             kwargs['json'] = data
             # Adjust headers for JSON if necessary (though requests handles this usually)
-            kwargs['headers']['Content-Type'] = 'application/json'
+            if content_type is None:
+                kwargs['headers']['Content-Type'] = 'application/json'
         elif data:
-            kwargs['data'] = data # Form data for Gupshup
+            if data:
+                for key, value in data.items():
+                    if isinstance(value, (dict, list)):
+                        logger.debug(f'Converting {key} to JSON string')
+                        data[key] = json.dumps(value)
+                    elif not isinstance(value, str):
+                        logger.debug(f'Converting {key} to string')
+                        data[key] = str(value)
 
+                logger.debug(f'Final payload before POST: {data}')
+                logger.debug('Converting payload to form data')
+                kwargs['data'] = data
+                if content_type is None:
+                    kwargs['headers']['Content-Type'] = 'application/x-www-form-urlencoded'
+        
+        if content_type is not None:
+            kwargs['headers']['Content-Type'] = content_type
         # 1. Create a Request object (not prepared) for cURL dumping
         req = requests.Request(method, url, **kwargs)
         prepped = req.prepare()
-
-        # 2. Log cURL command from the prepared request
-        # NOTE: We use prepped object here, not the response, to get the cURL before send
-        #cUrl_request = dump.dump_response(prepped).decode('utf-8')
-        #logger.debug(f"cURL Request sent to Gupshup:\n{cUrl_request}")
         
-        # 3. Send Request
+        # 2. Send Request
         with requests.Session() as s:
             try:
                 # Use stream=False for non-media uploads
+                if data:
+                    logger.info("Encoded form data:\n%s", urlencode(data))
+
                 r = s.send(prepped,timeout=10, allow_redirects=True)
+                logger.debug(f'response from gupshup {r}')
                 try:
                     dump_data = dump.dump_all(r)
                     logger.debug("Outgoing HTTP:\n%s", dump_data.decode("utf-8"))
@@ -74,7 +98,7 @@ class GupshupProvider(BaseProvider):
                 logger.error("Network Error during Gupshup request (%s %s): %s", method, endpoint, e)
                 return {'ok': False, 'status_code': 0, 'response': f'Network Error: {e}'}
 
-        # 4. Process Successful Response
+        # 3. Process Successful Response
         response_data = {'ok': True, 'status_code': r.status_code}
         try:
             # Attempt to parse JSON only if content type indicates JSON
@@ -87,51 +111,106 @@ class GupshupProvider(BaseProvider):
         
         return response_data
 
-    def upload_media(self, template):
+    def upload_media(self, media_url, file_type):
         """
-        Uploads media to Gupshup using template.media_url (public URL).
+        Uploads media to Gupshup using the actual binary file (downloaded from media_url).
         Returns the handle ID string on success.
         """
         try:
-            logger.debug('Uploading media for template %s from URL: %s', template.id, template.media_url)
-            if not template.media_url:
+            logger.debug('Uploading media from URL: %s', media_url)
+            if not media_url:
                 return None
+
+            # Step 1: Download file content
+            download_resp = requests.get(media_url, stream=False, timeout=10)
+            logger.debug(f'download response {download_resp.status_code}')
+            if download_resp.status_code != 200:
+                raise requests.exceptions.RequestException(
+                    f"Failed to download media from {media_url}, status={download_resp.status_code}"
+                )
+            download_resp.raise_for_status()
+
+            filename = urlparse(media_url).path.split("/")[-1] or "media_file"
             
-            # We assume Gupshup allows uploading a public URL via x-www-form-urlencoded
-            url = f"/partner/app/{self.app_id}/upload/media"
-            
-            # Gupshup docs show a form, so let's send form data instead of JSON
-            data = {
-                'file_type': template.file_type.upper(), # Required for form data upload
-                'mediaUrl': template.media_url # Using mediaUrl based on your previous code structure
+            file_bytes = BytesIO(download_resp.content)
+            logger.debug("File bytes successfully downloaded")
+
+            # Step 2: Prepare upload details
+            upload_url = f"{self.BASE}/partner/app/{self.app_id}/upload/media"
+
+            files = {
+                "file": (filename, file_bytes, file_type.lower())
             }
-            
+            data = {
+                "file_type": file_type.lower()
+            }
+
+            # Step 3: Retry upload up to 3 times
             for attempt in range(3):
-                logger.debug('Attempt %d to upload media', attempt + 1)
-                # requests handles encoding data=dict as application/x-www-form-urlencoded
-                #r = requests.post(url, headers=self.headers(), data=data, timeout=10)
-                provider_resp_data = self._make_request(method='POST', endpoint=url, data=data)
-                if provider_resp_data.get('ok'):
-                    response_body = provider_resp_data.get('json', provider_resp_data.get('text'))
-                    logger.debug('Media upload response body: %s', response_body)
-                    if provider_resp_data.get('json', {}).get('status') == 'success':
-                        handle_id = provider_resp_data['json'].get('handleId', {}).get('message')
-                        if handle_id:
-                            logger.debug('Media upload successful, handleId: %s', handle_id)
-                            return handle_id
+                logger.debug("Attempt %d to upload media", attempt + 1)
+                h = self.headers()
+                if 'content-type' in h:
+                    del h['content-type']
+                
+                try:
+                    response = requests.post(
+                        upload_url,
+                        headers=h,
+                        files=files,
+                        data=data,
+                        timeout=20,
+                    )
+                    logger.debug("Media upload response: %s", response.text)
+
+                    if response.status_code == 200:
+                        resp_json = response.json()
+                        if resp_json.get("status") == "success":
+                            handle_id_obj = resp_json.get("handleId")
+
+                            if isinstance(handle_id_obj, dict):
+                                handle_id = handle_id_obj.get("message")
+                            # Or if handleId is a direct string field (more common)
+                            else:
+                                handle_id = resp_json.get("handleId")
+
+                            
+                            if handle_id:
+                                logger.info("Media uploaded successfully, handleId: %s", handle_id)
+                                return handle_id  
+                            else:
+                                logger.warning("Upload success but missing handleId field: %s", resp_json)
+                                # Log the full response text for debugging the handleId structure
+                                logger.error("Gupshup response text: %s", response.text) 
+                                raise requests.exceptions.HTTPError("Missing handleId in Gupshup response")
+  
+                            # handle_id = resp_json.get("handleId", {}).get("message")
+                            # if handle_id:
+                            #     logger.info("Media uploaded successfully, handleId: %s", handle_id)
+                            #     return handle_id
+                            # else:
+                            #     logger.warning("Upload success but missing handleId field: %s", resp_json)
+                            #     raise requests.exceptions.HTTPError("Missing handleId in Gupshup response")
                         else:
-                            logger.warning('Media upload successful but missing handleId: %s', response_body)
-                            raise requests.exceptions.HTTPError("Media upload response missing handleId.")
+                            logger.warning("Upload failed with status=%s, message=%s", resp_json.get("status"), resp_json.get("message"))
+                            logger.error("Gupshup error response: %s", response.text)
                     else:
-                        logger.warning('Media upload failed with response: %s', response_body)
-                        time.sleep(1 + attempt)  # Exponential backoff
-                else:
-                    logger.warning('Media upload failed (status %d): %s', r.status_code, r.text)
-                    time.sleep(1 + attempt)
-            logger.error('Media upload failed after 3 attempts.')
-            raise requests.exceptions.HTTPError('Media upload failed after retries.')
+                        logger.warning("Upload failed with HTTP %s: %s", response.status_code, response.text)
+                        response.raise_for_status() # For non-200 responses, raise to trigger retry/exit
+
+                except Exception as e:
+                    logger.error("Error on upload attempt %d: %s", attempt + 1, str(e))
+
+                # Retry after exponential backoff
+                time.sleep(1 + attempt)
+
+            logger.error("Media upload failed after 3 attempts.")
+            raise requests.exceptions.HTTPError("Media upload failed after retries.")
+
+        except requests.exceptions.RequestException as e:
+            logger.error("Request/Network Exception during media upload: %s", str(e))
+            raise e
         except Exception as e:
-            logger.error('Exception during media upload: %s', str(e))
+            logger.error("General Exception during media upload: %s", str(e))
             raise e
 
     def submit_template(self, template):
@@ -153,10 +232,9 @@ class GupshupProvider(BaseProvider):
                         logger.error('Invalid media URL or file type, aborting template submission')
                         return {'ok': False, 'response': 'Invalid media URL or file type'}
                     
-                    upload = self.upload_media(template)
-                    handle_id = self.upload_media(template)
+                    handle_id = self.upload_media(template.media_url, template.file_type)
                     if handle_id:
-                        logger.debug('Media uploaded successfully: %s', upload)
+                        logger.debug('Media uploaded successfully: %s', handle_id)
                         template.provider_metadata['media_id'] = handle_id
                         template.save()
                     else:
@@ -168,7 +246,7 @@ class GupshupProvider(BaseProvider):
                 'languageCode': template.languageCode,
                 'content': template.content,
                 'category': template.category,
-                'templateType': template.template_type,
+                'templateType': template.templateType,
                 'vertical': template.vertical,
                 'footer': template.footer,
                 'allowTemplateCategoryChange': str(template.allowTemplateCategoryChange).lower(),
@@ -187,10 +265,11 @@ class GupshupProvider(BaseProvider):
                     payload_buttons = template.payload.get('buttons')
                     buttons = self.parse_buttons(payload_buttons)
             
-            if buttons.__len__() > 0:
+            if buttons:
                 payload['buttons'] = json.dumps(buttons)  # Gupshup expects double quotes in JSON strings
+
             
-            if template.template_type.lower() == 'carousel' and template.payload.get('cards'):
+            if template.templateType.lower() == 'carousel' and template.payload.get('cards'):
                 cards = []
                 for card_data in template.payload.get('cards'):
                     card = {
@@ -206,17 +285,17 @@ class GupshupProvider(BaseProvider):
                             logger.error('Invalid media URL or file type for carousel card, aborting template submission')
                             return {'ok': False, 'response': 'Invalid media URL or file type in carousel card'}
 
-                        card_upload = self.upload_media(card_data.get('mediaUrl'))
-                        if card_upload and card_upload.get('status') == 'success':
-                            card['exampleMedia '] = card_upload.get('handleId').get('message')
+                        card_upload = self.upload_media(card_data.get('mediaUrl'), card_data.get('headerType'))
+                        if card_upload:
+                            card['exampleMedia'] = card_upload.get('handleId').get('message')
                         else:
                             logger.error('Failed to upload media for carousel card: %s', card_data.get('mediaUrl'))
                             return {'ok': False, 'response': 'Failed to upload media for carousel card'}
                     
                     if card_data.get('buttons'):
                         card_buttons = self.parse_buttons(card_data.get('buttons'))
-                        if buttons.__len__() > 0:
-                            card['buttons'] = json.dumps(buttons)
+                        if card_buttons:
+                            card['buttons'] = json.dumps(card_buttons)
 
                     cards.append(card)
                 payload['cards'] = json.dumps(cards)  # Gupshup expects double quotes in JSON strings
@@ -226,13 +305,13 @@ class GupshupProvider(BaseProvider):
 
             # Handle more fields based on type
             #r = requests.post(url, headers=self.headers(), data=payload, timeout=10)
-            url_path = f"/partner/app/{self.app_id}/templates/{template.template_type.lower()}"
+            url_path = f"/partner/app/{self.app_id}/templates"
             provider_resp_data = self._make_request( method='POST', endpoint=url_path, data=payload)
             if provider_resp_data.get('ok'):
                 response_body = provider_resp_data.get('json', provider_resp_data.get('text'))
                 # ... (your success logic using response_body) ...
                 if provider_resp_data.get('json', {}).get('status') == 'success':
-                    self.save_template_provider(provider_resp_data['json'], template)
+                    self.save_template_data_from_provider(provider_resp_data['json'], template)
                     return {'ok': True, 'response': template.json()}
                 else:
                     error_text = response_body # Use the JSON response body here
@@ -253,22 +332,57 @@ class GupshupProvider(BaseProvider):
 
     def save_template_data_from_provider(self, r, template):
         logger.debug('Saving provider response data to template %s', r.json())
-        t_data = r.json().get('template', {}).json()
-        template.provider_template_id = t_data.get('id')
-        template.status = t_data.get('status', 'pending')
-        template.containerMeta = t_data.get('containerMeta', {})
-        template.createdOn = t_data.get('createdOn')
-        template.modifiedOn = t_data.get('modifiedOn')
-        template.data = t_data.get('data')
-        template.elementName = t_data.get('elementName')
-        template.languagePolicy = t_data.get('languagePolicy')
-        template.meta = t_data.get('meta')
-        template.namespace = t_data.get('namespace')
-        template.priority = t_data.get('priority', 0)
-        template.quality = t_data.get('quality')
-        template.retry = t_data.get('retry', 0)
-        template.stage = t_data.get('stage')
-        template.wabaId = t_data.get('wabaId')
+        t_data = r.get('template', {})
+
+        if t_data.get('containerMeta'):
+            template.containerMeta = t_data.get('containerMeta')
+            self.parse_container_meta(t_data, template)
+
+        if t_data.get('buttonSupported'):
+            template.buttonSupported = t_data.get('buttonSupported')
+        if t_data.get('id'):
+            template.provider_template_id = t_data.get('id')
+
+        if t_data.get('internalCategory'):
+            template.internalCategory = t_data.get('internalCategory')
+        if t_data.get('internalType'):
+            template.internalType = t_data.get('internalType')
+
+        if t_data.get('externalId'):
+            template.externalId = t_data.get('externalId')
+
+        if t_data.get('oldCategory'):
+            template.oldCategory = t_data.get('oldCategory')
+
+        if t_data.get('status'):    
+            template.status = t_data.get('status')
+
+        if t_data.get('createdOn'):
+            template.createdOn = t_data.get('createdOn')
+
+        if t_data.get('modifiedOn'):
+            template.modifiedOn = t_data.get('modifiedOn')
+
+        if t_data.get('data'):
+            template.data = t_data.get('data')
+        if t_data.get('elementName'):
+            template.elementName = t_data.get('elementName')
+        if t_data.get('languagePolicy'):
+            template.languagePolicy = t_data.get('languagePolicy')
+        if t_data.get('meta'):
+            template.meta = t_data.get('meta')
+        if t_data.get('namespace'):
+            template.namespace = t_data.get('namespace')
+        if t_data.get('priority'):
+            template.priority = t_data.get('priority')
+        if t_data.get('quality'):
+            template.quality = t_data.get('quality')
+        if t_data.get('retry'):
+            template.retry = t_data.get('retry')
+        if t_data.get('stage'):
+            template.stage = t_data.get('stage')
+        if t_data.get('wabaId'):
+            template.wabaId = t_data.get('wabaId')
         template.save()
     
     def parse_buttons(self, buttons_data):
@@ -284,26 +398,65 @@ class GupshupProvider(BaseProvider):
                 button['url'] = payload_button.get('url')
                 button['buttonValue'] = payload_button.get('buttonValue')
                 button['suffix'] = payload_button.get('suffix')
+            elif payload_button.get('type') == "PHONE_NUMBER":
+                button['type'] = 'PHONE_NUMBER'
+                button['text'] = payload_button.get('text')
+                button['phone_number'] = payload_button.get('phone_number')
             buttons.append(button)
         return buttons
 
     
     def get_templates(self):
-        try:
-            logger.debug('Fetching templates')
-            url = f"/partner/app/{self.app_id}/templates"
-            #r = requests.get(url, headers=self.headers(), timeout=10)
-            provider_resp_data = self._make_request(method='GET', endpoint=url)
-            if provider_resp_data.get('ok'):
-                response_body = provider_resp_data.get('json', provider_resp_data.get('text'))
-                logger.debug('Get template response body: %s', response_body)
-                return {'ok': True, 'response': response_body.get('templates', [])}
+        # try:
+        logger.debug('Fetching templates')
+        url = f"/partner/app/{self.app_id}/templates"
+        #r = requests.get(url, headers=self.headers(), timeout=10)
+        provider_resp_data = self._make_request(method='GET', endpoint=url)
+        logger.debug(f'provider response: {provider_resp_data}')
+        if provider_resp_data.get('ok'):
+            response_body = provider_resp_data.get('json')
+            
+            # If 'json' key is missing, check if 'text' is present and try to parse it
+            if response_body is None and provider_resp_data.get('text'):
+                try:
+                    response_body = json.loads(provider_resp_data['text'])
+                except json.JSONDecodeError:
+                    logger.error("Failed to decode text response as JSON: %s", provider_resp_data['text'])
+                    return {'ok': False, 'response': 'Provider returned unparseable text response.'}
+
+            # If after all attempts, response_body is still None or not a dict, handle it.
+            if not isinstance(response_body, dict):
+                logger.error("Get templates API did not return a dictionary object.")
+                return {'ok': False, 'response': "Provider returned an invalid or empty JSON response."}
+            
+            
+            logger.debug('Get template response body: %s', response_body)
+            if response_body.get('status') == 'success':
+                templates = response_body.get('templates', [])
+                
+                templates_to_update = []
+                for tpl in templates:
+                    element_name = tpl.get('elementName')
+                    if not element_name:
+                        continue
+                    # Compute hash of template content for change detection
+                    tpl_hash = hashlib.md5(json.dumps(tpl, sort_keys=True).encode('utf-8')).hexdigest()
+
+                    template_obj = WhatsAppTemplate.objects.filter(elementName=element_name).first()
+                    logger.debug(f'template_obj : {template_obj}')
+
+                    t_update = self.sync_templates(tpl, tpl_hash, template_obj)
+                    templates_to_update.append(t_update)
+
+                return {'ok': True, 'response': templates_to_update}
             else:
-                logger.error('Failed to fetch templates: %s', provider_resp_data.get('response'))
-                return {'ok': False, 'response': provider_resp_data.get('response')}
-        except Exception as e:
-            logger.error('Exception during fetching templates: %s', str(e))
-            return {'ok': False, 'response': "Internal error"}
+                return {'ok': False, 'response': response_body}
+        else:
+            logger.error('Failed to fetch templates: %s', provider_resp_data.get('response'))
+            return {'ok': False, 'response': provider_resp_data.get('response')}
+        # except Exception as e:
+        #     logger.error('Exception during fetching templates: %s', str(e))
+        #     return {'ok': False, 'response': "Internal error"}
     
     def delete_template(self, template):
         try: 
@@ -357,4 +510,122 @@ class GupshupProvider(BaseProvider):
         except Exception as e:
             logger.error('Exception during template update: %s', str(e))
             return {'ok': False, 'response': "Internal error"}
+        
+    def sync_templates(self, tpl,tpl_hash, template_obj = None):
+        
+        if template_obj is not None:
+            logger.debug("template_obj present, updating")
+            if template_obj.hash != tpl_hash:
+                logger.debug("template_obj and gupshup template hash code mismatched, procedding with update")
+                template_obj.hash = tpl_hash
+                template_obj.provider_app_instance_app_id_id  = tpl.get('appId')
+                template_obj.org_id_id = self.org_id
+                template_obj.buttonSupported = tpl.get('buttonSupported')
+                template_obj.category = tpl.get('category')
+                template_obj.containerMeta = tpl.get('containerMeta')
+                template_obj.createdOn = tpl.get('createdOn')
+                template_obj.data = tpl.get('data')
+                template_obj.elementName = tpl.get('elementName')
+                template_obj.externalId = tpl.get('externalId')
+                template_obj.provider_template_id = tpl.get('id')
+                template_obj.internalCategory = tpl.get('internalCategory')
+                template_obj.internalType = tpl.get('internalType')
+                template_obj.languageCode = tpl.get('languageCode')
+                template_obj.languagePolicy = tpl.get('languagePolicy')
+                template_obj.meta = tpl.get('meta')
+                template_obj.modifiedOn = tpl.get('modifiedOn')
+                template_obj.namespace = tpl.get('namespace')
+                template_obj.oldCategory = tpl.get('oldCategory')
+                template_obj.priority = tpl.get('priority')
+                template_obj.quality = tpl.get('quality')
+                template_obj.retry = tpl.get('retry')
+                template_obj.stage = tpl.get('stage')
+                template_obj.status = tpl.get('status')
+                template_obj.templateType = tpl.get('templateType')
+                template_obj.wabaId = tpl.get('wabaId')
+
+                template_obj.provider_metadata.update({'last_update': str(datetime.now().timestamp())})
+                
+                if tpl.get('containerMeta'):
+                    self.parse_container_meta(tpl.get('containerMeta'), template_obj)
+            return template_obj
+
+        else:
+            logger.debug("template_obj not present, creating new")
+            new_template = WhatsAppTemplate(
+                org_id_id = self.org_id, 
+                hash = tpl_hash,
+                provider_app_instance_app_id_id = tpl.get('appId'),
+                buttonSupported = tpl.get('buttonSupported'),
+                category = tpl.get('category'),
+                containerMeta = tpl.get('containerMeta'),
+                createdOn = tpl.get('createdOn'),
+                data = tpl.get('data'),
+                elementName = tpl.get('elementName'),
+                externalId = tpl.get('externalId'),
+                provider_template_id = tpl.get('id'),
+                internalCategory = tpl.get('internalCategory'),
+                internalType = tpl.get('internalType'),
+                languageCode = tpl.get('languageCode'),
+                languagePolicy = tpl.get('languagePolicy'),
+                meta = tpl.get('meta'),
+                modifiedOn = tpl.get('modifiedOn'),
+                namespace = tpl.get('namespace'),
+                oldCategory = tpl.get('oldCategory'),
+                priority = tpl.get('priority'),
+                quality = tpl.get('quality'),
+                retry = tpl.get('retry'),
+                stage = tpl.get('stage'),
+                status = tpl.get('status'),
+                templateType = tpl.get('templateType'),
+                wabaId = tpl.get('wabaId'),
+            )
+            if tpl.get('containerMeta'):
+                self.parse_container_meta(tpl.get('containerMeta'), new_template)
+            return new_template
     
+    def parse_container_meta(self, containerMeta, t_obj):
+        # Check if containerMeta is already a dict (which causes the TypeError)
+        if isinstance(containerMeta, dict):
+            containerMeta_json = containerMeta
+        # If it's a string (the expected format), parse it
+        elif isinstance(containerMeta, (str, bytes, bytearray)):
+            try:
+                containerMeta_json = json.loads(containerMeta)
+            except json.JSONDecodeError as e:
+                # Handle the case where the string is not valid JSON
+                print(f"Error decoding JSON for containerMeta: {e}")
+                return t_obj # Return object without parsing meta
+        else:
+            # Handle unexpected types gracefully
+            print(f"Unexpected type for containerMeta: {type(containerMeta)}")
+            return t_obj
+    
+        if containerMeta_json.get('data'):
+            t_obj.content = containerMeta_json.get('data')
+        
+        if containerMeta_json.get("buttons"):
+            t_obj.payload = {'buttons': containerMeta_json.get("buttons")}
+        
+        if containerMeta_json.get("header"):
+            t_obj.header = containerMeta_json.get("header")
+
+        if containerMeta_json.get("footer"):
+            t_obj.footer = containerMeta_json.get("footer")
+        
+        if containerMeta_json.get("sampleText"):
+            t_obj.example = containerMeta_json.get("sampleText")
+
+        if containerMeta_json.get("sampleHeader"):
+            t_obj.exampleHeader = containerMeta_json.get("sampleHeader")
+
+        if containerMeta_json.get("enableSample"):
+            t_obj.enableSample = containerMeta_json.get("enableSample")
+        
+        if containerMeta_json.get("allowTemplateCategoryChange"):
+            t_obj.allowTemplateCategoryChange = containerMeta_json.get("allowTemplateCategoryChange")
+        
+        if containerMeta_json.get("correctCategory"):
+            t_obj.category = containerMeta_json.get("correctCategory")
+        return t_obj
+        

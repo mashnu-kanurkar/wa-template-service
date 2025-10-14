@@ -1,3 +1,4 @@
+import mimetypes
 import re
 from urllib.parse import urlparse
 from django.core.validators import URLValidator
@@ -5,54 +6,74 @@ from django.core.exceptions import ValidationError
 import logging
 
 logger = logging.getLogger(__name__)
-# --- Configuration for file extensions ---
-FILE_EXTENSIONS = {
-    'IMAGE': ('.jpg', '.jpeg', '.png', '.gif', '.webp', '.heic'),
-    'VIDEO': ('.mp4', '.mov', '.avi', '.webm', '.3gp'),
-    'DOCUMENT': ('.pdf', '.doc', '.docx', '.xls', '.xlsx', '.txt', '.csv'),
-    # Add other types as needed
+
+# Allowed MIME types
+ALLOWED_MIME_TYPES = {
+    "audio/aac",
+    "audio/mp4",
+    "audio/mpeg",
+    "audio/amr",
+    "audio/ogg",
+    "audio/opus",
+    "application/vnd.ms-powerpoint",
+    "application/msword",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "application/pdf",
+    "text/plain",
+    "application/vnd.ms-excel",
+    "image/jpeg",
+    "image/png",
+    "image/webp",
+    "video/mp4",
+    "video/3gpp",
 }
 
-# ----------------------------------------------------------------------
-# 1. URL and Extension Validation
-# ----------------------------------------------------------------------
-
-def is_valid_media_url(url: str, file_type: str) -> bool:
+def is_valid_media_url(url: str, expected_mime: str) -> bool:
     """
-    Checks if a URL is structurally correct and ends with an appropriate 
-    file extension for the given file_type.
+    Validates that:
+      1. URL is a valid HTTP(S) URL
+      2. The file extension maps to the expected MIME type
+      3. The MIME type is one of the allowed ones
     """
     if not url:
         return False
 
-    # 1. Basic URL structure check using Django's validator
+    # 1. Basic URL structure validation
     try:
         URLValidator(schemes=['http', 'https'])(url)
     except ValidationError:
+        logger.debug(f"Invalid URL structure: {url}")
         return False
-    
-    # 2. File extension check based on type
-    file_type = file_type.upper()
-    if file_type not in FILE_EXTENSIONS:
-        # If type is unknown, treat it as structurally valid but log a warning
-        # For this exercise, we enforce a check for known types.
-        logger.warning(f"Unknown file_type '{file_type}' provided for URL validation.")
-        return False 
-        
-    required_extensions = FILE_EXTENSIONS[file_type]
-    
-    # Extract the path part and check the extension
+
+    # 2. MIME type check validity
+    if expected_mime not in ALLOWED_MIME_TYPES:
+        logger.warning(f"Unexpected MIME type provided: {expected_mime}")
+        return False
+
+    # 3. Infer MIME type from file extension
     parsed_url = urlparse(url)
     url_path = parsed_url.path.lower()
 
-    # The file path must end with one of the required extensions
-    if not url_path.endswith(required_extensions):
-        logger.debug(f"URL extension check failed. Expected: {required_extensions}, Got: {url_path}")
-        return False
-    
-    logger.debug(f"URL '{url}' passed validation for type '{file_type}'")
-    return True
+    guessed_mime, _ = mimetypes.guess_type(url_path)
 
+    if not guessed_mime:
+        logger.debug(f"Could not infer MIME type from URL: {url}")
+        return False
+
+    # 4. Match inferred MIME with expected
+    if guessed_mime != expected_mime:
+        logger.debug(f"MIME type mismatch: expected {expected_mime}, got {guessed_mime}")
+        return False
+
+    # 5. Finally, check that expected MIME is allowed
+    if expected_mime not in ALLOWED_MIME_TYPES:
+        logger.debug(f"MIME {expected_mime} not in allowed list.")
+        return False
+
+    logger.debug(f"URL '{url}' is valid for MIME type '{expected_mime}'")
+    return True
 # ----------------------------------------------------------------------
 # 2. Gupshup Handle ID Check
 # ----------------------------------------------------------------------

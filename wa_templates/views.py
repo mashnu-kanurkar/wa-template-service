@@ -11,7 +11,6 @@ from drf_yasg import openapi
 
 from .models import WhatsAppTemplate, Organisation, ProviderAppInstance
 from .serializers import WhatsAppTemplateSerializer, OrganisationSerializer, ProviderAppInstanceSerializer
-from .tasks import delete_template_with_provider, submit_template_for_approval, update_template_with_provider
 from .auth import JWTAuthentication
 from . import template_schemas
 
@@ -67,7 +66,7 @@ class WhatsAppTemplateViewSet(OrgAppAwareViewSet):
             properties={
                 'org_id': openapi.Schema(type=openapi.TYPE_STRING, description='External org identifier'),
                 'elementName': openapi.Schema(type=openapi.TYPE_STRING),
-                'template_type': openapi.Schema(type=openapi.TYPE_STRING, description='TEXT|IMAGE|VIDEO|DOCUMENT|CAROUSEL|CATALOG'),
+                'templateType': openapi.Schema(type=openapi.TYPE_STRING, description='TEXT|IMAGE|VIDEO|DOCUMENT|CAROUSEL|CATALOG'),
                 'content': openapi.Schema(type=openapi.TYPE_STRING),
                 'media_url': openapi.Schema(type=openapi.TYPE_STRING),
                 'payload': openapi.Schema(type=openapi.TYPE_OBJECT)
@@ -75,7 +74,7 @@ class WhatsAppTemplateViewSet(OrgAppAwareViewSet):
             example={
                 'org_id': 'org_abc',
                 'elementName': 'otp_template',
-                'template_type': 'TEXT',
+                'templateType': 'TEXT',
                 'content': 'your otp is {{1}}',
                 'media_url': None,
                 'payload': {'elementName': 'text_element1', 'languageCode': 'en', 'content': 'your otp is {{1}}', 'category': 'MARKETING', 'vertical': 'Internal_vertical', 'example': 'your otp is {{1}}'}
@@ -126,6 +125,7 @@ class WhatsAppTemplateViewSet(OrgAppAwareViewSet):
             raise ValidationError({"app_id": f"Provider app '{app_id}' not found for this org"})
         
     def perform_update(self, serializer):
+        from .tasks import update_template_with_provider
         logger.debug('Performing update for WhatsAppTemplate and submitting for approval')
         org_id, app_id = self.get_org_and_app()
         # Save local changes first
@@ -139,6 +139,7 @@ class WhatsAppTemplateViewSet(OrgAppAwareViewSet):
             raise ValidationError({"app_id": f"Provider app '{app_id}' not found for this org"})
     
     def perform_destroy(self, instance):
+        from .tasks import delete_template_with_provider
         logger.debug('Performing destroy for WhatsAppTemplate and notifying provider')
         org_id, app_id = self.get_org_and_app()
         try:
@@ -174,6 +175,7 @@ class WhatsAppTemplateViewSet(OrgAppAwareViewSet):
         }
     )
     def send_for_approval(self, request, app_id=None, pk=None):
+        from .tasks import submit_template_for_approval
         logger.debug('Sending template %s for approval (app_id=%s)', pk, app_id)
         org_id, app_id = self.get_org_and_app()
         try:
@@ -184,6 +186,24 @@ class WhatsAppTemplateViewSet(OrgAppAwareViewSet):
                 logger.error('Failed to enqueue submit_template_for_approval task for template %s', pk)
                 return Response({'detail': 'Failed to enqueue task'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
             logger.info('Template %s submitted for approval, task id: %s', pk, res.id)
+            return Response({'message': 'Task enqueued', 'task_id': res.id}, status=status.HTTP_202_ACCEPTED)
+
+        except ProviderAppInstance.DoesNotExist:
+            logger.error('ProviderAppInstance not found for org_id %s and app_id %s', org_id, app_id)
+            return Response({"error": "Invalid organisation or app_id"}, status=404)
+    
+    def sync_from_provider(self, request, app_id=None):
+        from .tasks import sync_templates_for_app_id
+        logger.debug('Syncing templates from provider (app_id=%s)', app_id)
+        org_id, app_id = self.get_org_and_app()
+        try:
+            # enqueue celery task
+            logger.debug('Enqueuing sync task for templates')
+            res = sync_templates_for_app_id.delay( app_id, org_id)
+            if not res:
+                logger.error('Failed to enqueue sync_templates_for_app_id task for appId %s', app_id)
+                return Response({'detail': 'Failed to enqueue task'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            logger.info('Templates syn operation queued for appId %s, task id: %s',app_id, res.id)
             return Response({'message': 'Task enqueued', 'task_id': res.id}, status=status.HTTP_202_ACCEPTED)
 
         except ProviderAppInstance.DoesNotExist:
@@ -212,8 +232,8 @@ class WhatsAppTemplateViewSet(OrgAppAwareViewSet):
         )
     }
 )
-def template_types(request):
-    types = [{'key': k, 'label': v} for k, v in WhatsAppTemplate.TEMPLATE_TYPES]
+def templateTypes(request):
+    types = [{'key': k, 'label': v} for k, v in WhatsAppTemplate.templateTypeS]
     schemas = template_schemas.SCHEMAS
     return Response({'types': types, 'schemas': schemas})
 
@@ -246,11 +266,11 @@ def template_types(request):
 def gupshup_webhook(request):
     logger.debug('Received Gupshup webhook: %s', request.data)
     data = request.data
-    template_id = data.get('template_id')
+    template_id = data.get('id')
     status_ = data.get('status')
     try:
         logger.debug('Fetching WhatsAppTemplate with id: %s', template_id)
-        t = WhatsAppTemplate.objects.get(id=template_id)
+        t = WhatsAppTemplate.objects.get(provider_template_id=template_id)
     except WhatsAppTemplate.DoesNotExist:
         logger.error('WhatsAppTemplate not found with id: %s', template_id)
         return Response({'detail': 'not found'}, status=404)

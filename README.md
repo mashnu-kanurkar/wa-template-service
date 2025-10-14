@@ -60,7 +60,7 @@ Example curl (development):
 curl -X POST http://127.0.0.1:8000/api/templates/ \
 	-H "Authorization: Bearer <dev-token>" \
 	-H "Content-Type: application/json" \
-	-d '{"name": "promo-1", "template_type": "TEXT", "payload": {"text": "Hello"}}'
+	-d '{"name": "promo-1", "templateType": "TEXT", "payload": {"text": "Hello"}}'
 ```
 
 In views you can read `request.org_id` (set by the middleware) to filter or

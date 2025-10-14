@@ -12,19 +12,19 @@ class WhatsAppTemplateSerializer(serializers.ModelSerializer):
         model = WhatsAppTemplate
         fields = ('id', 'languageCode','vertical', 'footer', 
                   'allowTemplateCategoryChange', 'example', 'exampleHeader', 
-                  'header','enableSample', 'template_type', 'category', 'content', 
+                  'header','enableSample', 'templateType', 'category', 'content', 
                   'media_url','file_type', 'provider_metadata', 'status', 'created_at', 
                   'updated_at', 'payload', 'provider_template_id', 'containerMeta', 'createdOn', 'data', 'elementName', 'languagePolicy', 'meta',
                   'namespace', 'modifiedOn', 'priority', 'quality', 'retry', 'stage', 'wabaId', 'errorMessage', 'isDeleted',)
         
 
     def validate(self, data):
-        # Validate template_type-specific rules
+        # Validate templateType-specific rules
         logger.debug('Validating WhatsAppTemplate data: %s', data)
-        ttype = data.get('template_type') or getattr(self.instance, 'template_type', None)
-        if ttype not in dict(WhatsAppTemplate.TEMPLATE_TYPES):
+        ttype = data.get('templateType') or getattr(self.instance, 'templateType', None)
+        if ttype not in dict(WhatsAppTemplate.templateTypeS):
             logger.error('Invalid template type: %s', ttype)
-            raise serializers.ValidationError({'template_type': 'Invalid template type'})
+            raise serializers.ValidationError({'templateType': 'Invalid template type'})
         # Add type-specific validations
         if ttype == 'TEXT' and not data.get('content'):
             logger.error('Text templates require content')
