@@ -5,6 +5,8 @@ from django.db import models
 import logging
 
 from django.forms import model_to_dict
+
+from wa_templates.utils.file_system import OverwriteStorage, temp_credential_path
 try:
     # Django 3.1+
     from django.db.models import JSONField
@@ -15,6 +17,8 @@ from cryptography.fernet import Fernet
 import base64
 import os
 import uuid
+from django.core.files.storage import FileSystemStorage
+
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +32,7 @@ class Organisation(models.Model):
     id = models.CharField(primary_key=True, max_length=100, editable=False, unique=True)
     name = models.CharField(max_length=255, unique=True)
     created_at = models.DateTimeField(auto_now_add=True)
+    created_by = models.CharField(max_length=100, blank=True, null=True)
 
     def __str__(self):
         return self.name
@@ -38,17 +43,19 @@ class ProviderAppInstance(models.Model):
     organisation = models.ForeignKey(
         Organisation, related_name="provider_apps", on_delete=models.CASCADE
     )
+    provider_nick_name = models.CharField(max_length=100)
     encrypted_app_token = models.BinaryField()
     encryption_secret = models.BinaryField(max_length=100)
     created_at = models.DateTimeField(auto_now_add=True)
     phone_number = models.CharField(max_length=20, blank=True, null=True)
+    created_by = models.CharField(max_length=100, blank=True, null=True)
     
 
     class Meta:
         unique_together = ("organisation", "app_id", "phone_number")
 
     def __str__(self):
-        return f"{self.organisation.name} - {self.app_name} ({self.app_id})"
+        return f"{self.organisation.name} - {self.provider_nick_name} ({self.app_id})"
 
     # -----------------
     # Encryption helpers
@@ -282,6 +289,7 @@ class WhatsAppTemplate(models.Model):
     isDeleted = models.CharField(max_length=10, choices=DELETE_CHOICES, default='none')
     hash = models.CharField(max_length=64, blank=True, null=True)
     webhookMeta = models.JSONField(default=dict, blank=True)
+    created_by = models.CharField(max_length=100, blank=True, null=True)
 
     class Meta:
         unique_together = ("org_id", "elementName", "languageCode", "provider_app_instance_app_id")
@@ -289,7 +297,7 @@ class WhatsAppTemplate(models.Model):
 
 
     def __str__(self):
-        return f"{self.elementName} ({self.org_id})"
+        return f"{self.elementName} ({self.provider_app_instance_app_id.app_id}) - {self.languageCode}"
     
     def generate_hash(self):
         # Only include fields that matter for detecting changes
@@ -397,8 +405,104 @@ class WhatsAppTemplate(models.Model):
         
         # 4. Save the instance to persist changes
         self.save()
+   
+class CatalogMetadata(models.Model):
+    """
+    Stores metadata about the catalog, linked to a ProviderInstance (WABA).
+    One CatalogMetadata per ProviderInstance (one-to-one or unique constraint).
+    """
+    # Link to the ProviderInstance/WABA account (One-to-One or Foreign Key with unique=True)
+    id = models.AutoField(primary_key=True)
+    provider_app_instance_app_id = models.OneToOneField(
+        ProviderAppInstance, 
+        on_delete=models.CASCADE, 
+        related_name='catalog_metadata',
+        verbose_name='WABA Account/Provider Instance',
+    )
     
+    catalog_url = models.URLField(
+        unique=True, 
+        help_text="The Google Sheet URL containing the catalog data."
+    )
     
+    # Audit fields
+    created_by = models.CharField(max_length=100, blank=True, null=True)
+    created_on = models.DateTimeField(auto_now_add=True)
+    updated_on = models.DateTimeField(auto_now=True)
+
+    google_service_file = models.FileField(
+        upload_to=temp_credential_path,
+        storage=OverwriteStorage(),
+        null=True,
+        blank=True,
+        help_text="Google Service Account JSON for accessing the Sheet"
+    )
+
+    class Meta:
+        verbose_name = "Catalog Metadata"
+        verbose_name_plural = "Catalog Metadata"
+        # Ensure only one catalog per provider instance is stored
+        constraints = [
+            models.UniqueConstraint(fields=['provider_app_instance_app_id'], name='unique_catalog_per_waba')
+        ]
+    
+    # -----------------
+    # Overridden save method to handle file movement (not working since file movement is delegated to celery worker, need shared storage)
+    # -----------------
+    # def save(self, *args, **kwargs):
+
+    #     from wa_templates.tasks import move_catalog_service_file_async
+    #     from django.core.files.storage import default_storage
+
+    #     is_new = self._state.adding and not self.pk
+
+    #     logger.debug(f"Saving CatalogMetadata for ProviderAppInstance {self.provider_app_instance_app_id.app_id}")
+
+    #     # Fetch old file for comparison (if updating)
+    #     old_file = None
+    #     if self.pk:
+    #         try:
+    #             logger.debug(f"Fetching existing CatalogMetadata for ID {self.pk} to compare files")
+    #             old_file = CatalogMetadata.objects.get(pk=self.pk).google_service_file
+    #         except CatalogMetadata.DoesNotExist:
+    #             logger.debug(f"No existing CatalogMetadata found for ID {self.pk}")
+    #             pass
+
+    #     super().save(*args, **kwargs)
+
+    #     # Check if a new file was uploaded or replaced
+    #     logger.debug("Checking if Google service file was changed...")
+    #     file_changed = (
+    #         self.google_service_file
+    #         and (is_new or (old_file and old_file.name != self.google_service_file.name))
+    #     )
+
+    #     if file_changed:
+    #         logger.info(f"Google service file changed for CatalogMetadata ID {self.id}, initiating async move task.")
+    #         # Delete old file if replaced
+    #         if old_file and old_file.name != self.google_service_file.name:
+    #             if default_storage.exists(old_file.name):
+    #                 default_storage.delete(old_file.name)
+
+    #         temp_path = self.google_service_file.path
+    #         logger.debug(f"Temporary file path: {temp_path}")
+
+    #         # Always rename final file to catalog-service.json
+    #         final_filename = "catalog-service.json"
+    #         logger.debug(f"Scheduling async task to move file to final location with name: {final_filename}")
+    #         move_catalog_service_file_async.delay(
+    #             catalog_id=str(self.id),
+    #             provider_app_id=str(self.provider_app_instance_app_id.app_id),
+    #             temp_path=temp_path,
+    #             filename=final_filename
+    #         )
+
+
+    def __str__(self):
+        return f"Catalog for {self.provider_app_instance_app_id.provider_nick_name}"
+
+# Note: Catalog data (product list) is NOT stored in the database; 
+# it's fetched dynamically from the Google Sheet.
 
     
     

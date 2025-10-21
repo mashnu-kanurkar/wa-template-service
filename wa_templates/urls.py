@@ -1,6 +1,6 @@
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
-from .views import WhatsAppTemplateViewSet, OrganisationViewSet, ProviderAppInstanceViewSet, TaskStatusView, gupshup_webhook, templateTypes
+from .views import CatalogDataViewSet, CatalogMetadataViewSet, WhatsAppTemplateViewSet, OrganisationViewSet, ProviderAppInstanceViewSet, TaskStatusView, gupshup_webhook, templateTypes
 
 router = DefaultRouter()
 router.register('templates', WhatsAppTemplateViewSet)
@@ -17,6 +17,19 @@ template_detail = WhatsAppTemplateViewSet.as_view({
     'put': 'update',
     'patch': 'partial_update',
     'delete': 'destroy'
+})
+catalog_meta_details = CatalogMetadataViewSet.as_view({
+    'get': 'retrieve',
+    'post': 'create',
+    'put': 'update',
+    'delete': 'destroy',
+})
+
+catalog_dataset_details = CatalogDataViewSet.as_view({
+    'get': 'retrieve',
+    'post': 'batch',
+    'put': 'batch',
+    'delete': 'destroy',
 })
 provider_details = ProviderAppInstanceViewSet.as_view(
     {
@@ -43,6 +56,9 @@ urlpatterns = [
     path('<str:app_id>/templates/sync_provider',template_sync_from_provider, name='template-sync-from-provider'),
 
     path('<str:app_id>/provider/', provider_details, name='provider-detail'),
+
+    path('<str:app_id>/catalog/metadata/', catalog_meta_details, name='catalog-metadata'),
+    path('<str:app_id>/catalog/data/', catalog_dataset_details, name='catalog-data'),
     
     path('tasks/<uuid:task_id>/status/', TaskStatusView.as_view(), name='task-status'),
 

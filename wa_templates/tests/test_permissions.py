@@ -9,7 +9,7 @@ class PermissionTest(TestCase):
     def setUp(self):
         self.tenant = Tenant.objects.create(name='Acme', slug='acme-1')
         self.other = Tenant.objects.create(name='Other', slug='other')
-        self.user = TenantUser.objects.create(tenant=self.tenant, username='joe', external_id='user-1')
+        self.user = TenantUser.objects.create(tenant=self.tenant, username='joe', user_id='user-1')
         self.client = Client()
 
     def make_token(self, payload):
@@ -20,7 +20,7 @@ class PermissionTest(TestCase):
         return jwt.encode(payload, 'secret', algorithm='HS256')
 
     def test_cannot_access_other_tenant(self):
-        token = self.make_token({'tenant': self.tenant.slug, 'sub': self.user.external_id})
+        token = self.make_token({'tenant': self.tenant.slug, 'sub': self.user.user_id})
         headers = {'HTTP_AUTHORIZATION': f'Bearer {token}', 'CONTENT_TYPE': 'application/json'}
         # try to create a template for other tenant
         import json

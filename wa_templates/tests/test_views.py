@@ -24,15 +24,15 @@ with mock.patch('wa_templates.views.submit_template_for_approval') as mock_task:
     # --- Mock User/Authentication Setup ---
     # Create a mock user object with the necessary attributes for JWTAuthentication
     class MockUser:
-        def __init__(self, org_id, external_id=None):
+        def __init__(self, org_id, user_id=None):
             self.org_id = org_id
-            self.external_id = external_id
+            self.user_id = user_id
             self.is_authenticated = True
 
     class MockJWTAuthentication:
         def authenticate(self, request):
             # Bypass actual JWT processing for testing. Use a standard org_id.
-            return (MockUser(org_id='org_A1', external_id='test_user'), None)
+            return (MockUser(org_id='org_A1', user_id='test_user'), None)
     
     # --- Setup Mocks for ViewSets ---
     

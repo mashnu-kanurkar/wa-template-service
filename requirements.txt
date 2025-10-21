@@ -11,3 +11,5 @@ cryptography
 dotenv
 psycopg2
 requests-toolbelt
+google-oauth2-tool
+gspread

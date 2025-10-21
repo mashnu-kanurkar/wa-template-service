@@ -1,6 +1,8 @@
 import uuid
+from django.forms import ValidationError
+from httplib2 import Response
 from rest_framework import serializers
-from .models import WhatsAppTemplate, Organisation, ProviderAppInstance
+from .models import CatalogMetadata, WhatsAppTemplate, Organisation, ProviderAppInstance
 from . import template_schemas
 import logging
 from django.core.exceptions import ObjectDoesNotExist
@@ -16,7 +18,7 @@ class WhatsAppTemplateSerializer(serializers.ModelSerializer):
                   'media_url', 'provider_metadata', 'status', 'created_at', 
                   'updated_at', 'payload', 'provider_template_id', 'containerMeta', 'createdOn', 
                   'data', 'elementName', 'languagePolicy', 'meta',
-                  'namespace', 'modifiedOn', 'priority', 'quality', 
+                  'namespace', 'modifiedOn', 'priority', 'quality', 'created_by',
                   'retry', 'stage', 'wabaId', 'errorMessageMeta', 'isDeleted','webhookMeta' )
         
 
@@ -59,7 +61,7 @@ class OrganisationSerializer(serializers.ModelSerializer):
     id = serializers.CharField(read_only=False, required=True)
     class Meta:
         model = Organisation
-        fields = ["id", "name", "created_at"]
+        fields = ["id", "name", "created_at", "created_by"]
         read_only_fields = ['created_at']
 
     def validate_id(self, value):
@@ -105,7 +107,7 @@ class ProviderAppInstanceSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = ProviderAppInstance
-        fields = ["app_id", "created_at", "app_token", "provider_name", "phone_number"]
+        fields = ["app_id", "created_at", "app_token", "provider_name", "phone_number", "provider_nick_name", "created_by"]
         read_only_fields = ['created_at']
     
     def validate_app_id(self, value):
@@ -176,3 +178,38 @@ class ProviderAppInstanceSerializer(serializers.ModelSerializer):
             instance.set_app_token(app_token)
         instance.save()
         return instance
+    
+
+class CatalogMetadataSerializer(serializers.ModelSerializer):
+    provider_app_instance_app_id = serializers.PrimaryKeyRelatedField(read_only=True)
+   
+    class Meta:
+        model = CatalogMetadata
+        # Note: 'provider_app_instance_app_id' is the actual foreign key field
+        fields = (
+            'id', 
+            'catalog_url', 
+            'provider_app_instance_app_id', # The ID of the provider instance
+            'google_service_file',
+            'created_by', 
+            'created_on', 
+            'updated_on'
+        )
+        read_only_fields = ["id", "created_on", "updated_on", "created_by"]
+        
+
+class CatalogDataSerializer(serializers.Serializer):
+    """
+    Serializer for the dynamic catalog product data (list of dictionaries).
+    This is used for request/response bodies for the data endpoints.
+    """
+    # Assuming catalog data is a list of product dictionaries
+    # Example structure for product:
+    # products = serializers.ListField(
+    #     child=serializers.DictField()
+    # )
+    
+    # Simpler approach: treat the input/output as a generic JSON structure
+    data = serializers.JSONField(
+        help_text="The list of product data from or to be written to the Google Sheet. Should be a list of lists where the first list is the header row for updates."
+    )

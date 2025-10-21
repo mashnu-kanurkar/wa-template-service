@@ -110,8 +110,8 @@ def test_submit_template_success_flow(mock_post, mock_get, caplog):
 
     # 3. Instantiate the provider with mock parameters
     provider = GupshupProvider(
-        app_token='sk_a11b38a0a73c455a85f3f828ca5b33db',
-        app_id='0f6c672a-6c89-4a3f-b17b-90c11455041b',
+        app_token='##',
+        app_id='##',
         org_id='mock_org_id'
     )
     

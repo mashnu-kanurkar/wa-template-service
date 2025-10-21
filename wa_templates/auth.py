@@ -9,7 +9,7 @@ logger = logging.getLogger(__name__)
 class JWTAuthentication(authentication.BaseAuthentication):
     """
     Decode JWT from Authorization header and attach a lightweight user object
-    containing org_id and external_id.
+    containing org_id and user_id.
     """
     def authenticate(self, request):
         auth = authentication.get_authorization_header(request).split()
@@ -34,17 +34,17 @@ class JWTAuthentication(authentication.BaseAuthentication):
         user_claim = getattr(settings, 'JWT_USER_CLAIM', 'sub')
 
         org_id = payload.get(org_claim) or payload.get('org_id')
-        external_id = payload.get(user_claim) or payload.get('sub') or payload.get('user_id')
+        user_id = payload.get(user_claim) or payload.get('sub') or payload.get('user_id')
 
-        if not org_id or not external_id:
+        if not org_id or not user_id:
             logger.debug("JWT missing org_id or user claim, returning payload without user object")
             return (None, payload)
 
         # Lightweight user object
         user = SimpleNamespace()
         user.org_id = str(org_id)
-        user.external_id = str(external_id)
+        user.user_id = str(user_id)
         user.is_authenticated = True
 
-        logger.debug("Authenticated user set with org_id: %s, external_id: %s", user.org_id, user.external_id)
+        logger.debug("Authenticated user set with org_id: %s, user_id: %s", user.org_id, user.user_id)
         return (user, payload)

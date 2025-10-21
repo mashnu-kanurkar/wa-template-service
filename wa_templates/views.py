@@ -1,4 +1,7 @@
+import json
 import logging
+import os
+from django.shortcuts import get_object_or_404
 from rest_framework.views import APIView
 from celery.result import AsyncResult
 from rest_framework import viewsets, status
@@ -8,11 +11,12 @@ from rest_framework.response import Response
 from rest_framework.exceptions import PermissionDenied, ValidationError, NotFound
 from drf_yasg.utils import swagger_auto_schema
 from drf_yasg import openapi
+from django.db import IntegrityError, transaction
+from django.core.files.storage import default_storage
+from wa_templates.utils.google_sheets import REQUIRED_FIELDS
 
-from wa_templates.tasks import process_gupshup_webhook
-
-from .models import WhatsAppTemplate, Organisation, ProviderAppInstance
-from .serializers import WhatsAppTemplateSerializer, OrganisationSerializer, ProviderAppInstanceSerializer
+from .models import CatalogMetadata, WhatsAppTemplate, Organisation, ProviderAppInstance
+from .serializers import CatalogMetadataSerializer, WhatsAppTemplateSerializer, OrganisationSerializer, ProviderAppInstanceSerializer
 from .auth import JWTAuthentication
 from . import template_schemas
 
@@ -30,13 +34,14 @@ class OrgAppAwareViewSet(viewsets.ModelViewSet):
         # Extract org_id and app_id from request
         org_id = getattr(self.request.user, "org_id", None)
         app_id = self.kwargs.get("app_id")
-        logger.debug('Extracting org_id and app_id from request: %s, %s', org_id, app_id)
+        provider_app_instance_app_id = self.kwargs.get("provider_app_instance_app_id")
+        logger.debug('Extracting org_id and app_id from request: %s, %s', org_id, app_id or provider_app_instance_app_id)
 
         if not org_id:
             raise PermissionDenied("Missing org_id in JWT")
-        if not app_id:
-            raise ValidationError({"app_id": "Path parameter 'app_id' is required."})
-        return org_id, app_id
+        if not app_id and not provider_app_instance_app_id:
+                raise ValidationError({"app_id": "Path parameter 'app_id' is required."})
+        return org_id, app_id if app_id else provider_app_instance_app_id
 
 # ---------------------------
 # WhatsAppTemplate ViewSet
@@ -58,9 +63,9 @@ class WhatsAppTemplateViewSet(OrgAppAwareViewSet):
         is_debug = self.request.query_params.get('debug', 'false').lower() == 'true'
         if is_debug:
             logger.debug('Debug mode enabled, returning all templates for org_id %s and app_id %s', org_id, app_id)
-            return qs.filter(org_id=org_id, provider_app_instance_app_id=app_id)
+            return qs.filter(org_id=org_id, provider_app_instance_app_id__app_id=app_id)
 
-        return qs.filter(org_id=org_id, provider_app_instance_app_id=app_id, isDeleted='none')
+        return qs.filter(org_id=org_id, provider_app_instance_app_id__app_id=app_id, isDeleted='none')
 
     @swagger_auto_schema(
         request_body=openapi.Schema(
@@ -87,6 +92,10 @@ class WhatsAppTemplateViewSet(OrgAppAwareViewSet):
         logger.debug('Performing create for WhatsAppTemplate')
         org_id, app_id = self.get_org_and_app()
 
+        user_id = getattr(self.request.user, "user_id", None)
+        if not user_id:
+            raise PermissionDenied("Missing user_id in JWT")
+
         try:
             organisation_instance = Organisation.objects.get(id=org_id)
         except Organisation.DoesNotExist:
@@ -99,6 +108,7 @@ class WhatsAppTemplateViewSet(OrgAppAwareViewSet):
         
         serializer.validated_data['org_id'] = organisation_instance
         serializer.validated_data['provider_app_instance_app_id'] = provider_instance
+        serializer.validated_data['created_by'] = user_id
         
         # Check if a template with the same name already exists in the filtered queryset
         template_elementName = serializer.validated_data.get('elementName')
@@ -269,6 +279,7 @@ def templateTypes(request):
     }
 )
 def gupshup_webhook(request):
+    from .tasks import process_gupshup_webhook
     logger.debug('Received Gupshup webhook: %s', request.data)
     data = request.data
     event_type = data.get('type')
@@ -329,9 +340,14 @@ class ProviderAppInstanceViewSet(viewsets.ModelViewSet):
     def perform_create(self, serializer):
         logger.debug('Performing create for ProviderAppInstance')
         org_id = getattr(self.request.user, "org_id", None)
+        user_id = getattr(self.request.user, "user_id", None)
+        if not user_id:
+            raise PermissionDenied("Missing user_id in JWT")
         if not org_id:
             raise PermissionDenied("Missing org_id in JWT")
-        serializer.save(organisation_id=org_id)
+        serializer.validated_data['organisation_id'] = org_id
+        serializer.validated_data['created_by'] = user_id
+        serializer.save()
 
 
 class TaskStatusView(APIView):
@@ -360,3 +376,238 @@ class TaskStatusView(APIView):
         # You can add custom handling for PENDING, STARTED, RETRY states if needed
 
         return Response(response_data)
+    
+class CatalogMetadataViewSet(OrgAppAwareViewSet):
+    """
+    Provides CRUD operations for Catalog Metadata.
+    """
+    queryset = CatalogMetadata.objects.all()
+    serializer_class = CatalogMetadataSerializer
+    #lookup_field = 'provider_app_instance_app_id'
+    # permission_classes = [IsAuthenticated] # Add proper permissions
+
+    ermission_classes = [IsAuthenticated]
+
+    def get_metadata(self):
+        app_id = self.kwargs.get("app_id")
+        return get_object_or_404(CatalogMetadata, provider_app_instance_app_id=app_id)
+    
+    def retrieve(self, request, *args, **kwargs):
+        catalog = self.get_metadata()
+        serializer = CatalogMetadataSerializer(catalog)
+        return Response(serializer.data)
+    
+    def update(self,  request, *args, **kwargs):
+        catalog = self.get_metadata()
+        mutable_data = request.data.copy()
+        serializer = CatalogMetadataSerializer(catalog, data=mutable_data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        self.perform_update(serializer)
+        return Response(serializer.data)
+
+
+    def perform_create(self, serializer):
+        logger.debug('Performing create for catalog metadata')
+
+        org_id, app_id = self.get_org_and_app()
+
+        try:
+            organisation_instance = Organisation.objects.get(id=org_id)
+        except Organisation.DoesNotExist:
+            raise ValidationError(f"Organisation with id '{org_id}' not found.")
+        
+        provider_instance = ProviderAppInstance.objects.filter(
+            organisation_id=organisation_instance.id, app_id=app_id
+        ).first()
+
+        if not provider_instance:
+            raise ValidationError(f"ProviderAppInstance with app_id '{app_id}' not found for organisation '{org_id}'.")
+
+        user_id = getattr(self.request.user, "user_id", None)
+        if user_id is None:
+            raise ValidationError("Authenticated user required to create catalog metadata.")
+        
+        # Save with unique constraint handling
+        try:
+            with transaction.atomic():
+                serializer.save(
+                    created_by=user_id,
+                    provider_app_instance_app_id=provider_instance
+                )
+        except IntegrityError as e:
+            logger.warning(f"Duplicate catalog creation attempt for provider_app_instance_app_id={app_id}")
+            raise ValidationError("Only one catalog can be created per WABA account.")
+
+
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        try:
+            self.perform_create(serializer)
+        except ValidationError as e:
+            # This will already be a nice message
+            raise e
+        except IntegrityError:
+            # Just in case it bubbles up
+            raise ValidationError("Only one catalog can be created per WABA account.")
+        headers = self.get_success_headers(serializer.data)
+        return Response(serializer.data, status=status.HTTP_201_CREATED, headers=headers)
+
+    def destroy(self, request, *args, **kwargs):
+        """Custom destroy to log the deletion."""
+        instance = self.get_metadata()
+        logger.warning(f"Catalog metadata deletion initiated for ID: {instance.id} (URL: {instance.catalog_url})")
+        instance.delete()
+        return Response(status=204)
+    
+
+class CatalogDataViewSet(viewsets.ViewSet):
+    """
+    Handle catalog data CRUD via background tasks.
+    All operations (GET, POST, PUT/PATCH, DELETE) return a Celery task ID immediately.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get_metadata(self):
+        app_id = self.kwargs.get("app_id")
+        logger.debug('Fetching CatalogMetadata for app_id: %s', app_id)
+        meta = get_object_or_404(CatalogMetadata, provider_app_instance_app_id=app_id)
+        logger.debug('Found CatalogMetadata: %s', meta)
+        return meta
+    
+    def retrieve(self, request, *args, **kwargs):
+        """Read catalog data via background task."""
+        from wa_templates.tasks import read_catalog_data_task
+        logger.debug("reading catalog data")
+
+        catalog = self.get_metadata()
+        catalog_url = catalog.catalog_url
+        service_file_content = catalog.google_service_file.read().decode('utf-8')
+        logger.debug('Reading catalog data via task for catalog %s', catalog_url)
+        logger.debug('service file content: %s', service_file_content)
+        task = read_catalog_data_task.delay(
+            catalog_url,
+            service_file_content
+        )
+        return Response({"task_id": task.id}, status=status.HTTP_202_ACCEPTED)
+    
+    def batch(self, request, *args, **kwargs):
+        from wa_templates.tasks import sync_catalog_product_batch_task
+        payload = request.data
+        add_list = payload.get("add", [])
+        update_list = payload.get("update", [])
+        delete_list = payload.get("delete", [])
+
+        # --- VALIDATION ---
+        for p in add_list:
+            missing = [f for f in REQUIRED_FIELDS if not p.get(f)]
+            if missing:
+                return Response(
+                    {"error": f"Missing required fields for add: {missing}", "product": p},
+                    status=400
+                )
+        for p in update_list:
+            if not p.get("id"):
+                return Response({"error": "ID required for update", "product": p}, status=400)
+
+        # --- TRIGGER TASK ---
+        catalog = self.get_metadata()
+        catalog_url = catalog.catalog_url
+        service_file_content = catalog.google_service_file.read().decode("utf-8")
+
+        payload = {"add": add_list, "update": update_list, "delete": delete_list}
+        task = sync_catalog_product_batch_task.delay(
+            catalog_url,
+            service_file_content,
+            json.dumps(payload)
+        )
+        logger.info(f"Triggered batch catalog task {task.id}")
+        return Response({"task_id": task.id}, status=status.HTTP_202_ACCEPTED)
+
+    def create(self, request, *args, **kwargs):
+        """Add new product(s) to the catalog via task."""
+        from wa_templates.tasks import sync_catalog_product_batch_task
+        payload = request.data
+        add_list = payload.get("add", [])
+
+        # --- VALIDATION ---
+        for p in add_list:
+            missing = [f for f in REQUIRED_FIELDS if not p.get(f)]
+            if missing:
+                return Response(
+                    {"error": f"Missing required fields for add: {missing}", "product": p},
+                    status=400
+                )
+            
+        logger.debug("adding catalog data")
+        # --- TRIGGER TASK ---
+        catalog = self.get_metadata()
+        catalog_url = catalog.catalog_url
+        service_file_content = catalog.google_service_file.read().decode("utf-8")
+        payload = {"add": add_list, "update": None, "delete": None}
+
+        task = sync_catalog_product_batch_task.delay(
+            catalog_url,
+            service_file_content,
+            json.dumps(payload)
+        )
+        logger.info(f"Triggered batch catalog task {task.id}")
+        return Response({"task_id": task.id}, status=status.HTTP_202_ACCEPTED)
+
+    # def update(self, request, *args, **kwargs):
+    #     from wa_templates.tasks import update_catalog_product_task
+    #     logger.debug("updating catalog data")
+    #     catalog = self.get_metadata()
+    #     catalog_url = catalog.catalog_url
+    #     service_file_content = catalog.google_service_file.read().decode('utf-8')
+    #     logger.debug('Updating catalog product via task for catalog %s', catalog_url)
+    #     logger.debug('service file content: %s', service_file_content)
+    #     task = update_catalog_product_task.delay(
+    #         catalog_url,
+    #         service_file_content,
+    #         request.data
+    #     )
+    #     return Response({"task_id": task.id}, status=status.HTTP_202_ACCEPTED)
+
+    # def partial_update(self, request, *args, **kwargs):
+    #     from wa_templates.tasks import update_catalog_product_task
+    #     logger.debug("partially updating catalog data")
+    #     catalog = self.get_metadata()
+    #     catalog_url = catalog.catalog_url
+    #     service_file_content = catalog.google_service_file.read().decode('utf-8')
+    #     logger.debug('Patial updating catalog product via task for catalog %s', catalog_url)
+    #     logger.debug('service file content: %s', service_file_content)
+    #     task = update_catalog_product_task.delay(
+    #         catalog_url,
+    #         service_file_content,
+    #         request.data,
+    #         partial=True
+    #     )
+    #     return Response({"task_id": task.id}, status=status.HTTP_202_ACCEPTED)
+
+    def destroy(self, request, *args, **kwargs):
+        from wa_templates.tasks import sync_catalog_product_batch_task
+        payload = request.data
+        delete_list = payload.get("delete", [])
+
+        logger.debug("deleting catalog data")
+        catalog = self.get_metadata()
+        catalog_url = catalog.catalog_url
+        service_file_content = catalog.google_service_file.read().decode('utf-8')
+
+        logger.debug('deleting %d catalog product via task for catalog %s',len(delete_list), catalog_url)
+        logger.debug('service file content: %s', service_file_content)
+
+        payload = {"add": None, "update": None, "delete": delete_list}
+        task = sync_catalog_product_batch_task.delay(
+            catalog_url,
+            service_file_content,
+            json.dumps(payload)
+        )
+        logger.info(f"Triggered batch catalog task {task.id}")
+        return Response({"task_id": task.id}, status=status.HTTP_202_ACCEPTED)
+
+
+    
+
+    
